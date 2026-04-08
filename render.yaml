@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: reybraztech-scraper
+    env: node
+    region: oregon
+    plan: free
+    rootDir: .
+    buildCommand: npm install --include=dev && npx puppeteer browsers install chrome && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PUPPETEER_CACHE_DIR
+        value: /opt/render/.cache/puppeteer
