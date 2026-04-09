@@ -212,13 +212,8 @@ export async function loginToPanel(config: {
 
   const isLinux = process.platform === 'linux';
 
-  const chromePath = isLinux 
-    ? '/opt/render/.cache/puppeteer/chrome/linux-146.0.7680.76/chrome-linux64/chrome'
-    : undefined;
-
-  const browser = await puppeteer.launch({
+  const launchOptions: Parameters<typeof puppeteer.launch>[0] = {
     headless: config.headless,
-    executablePath: chromePath,
     defaultViewport: { width: 1280, height: 900 },
     timeout: 60000,
     args: [
@@ -238,7 +233,9 @@ export async function loginToPanel(config: {
         '--disable-default-apps',
       ] : []),
     ],
-  });
+  };
+
+  const browser = await puppeteer.launch(launchOptions);
 
   const page = await browser.newPage();
 
