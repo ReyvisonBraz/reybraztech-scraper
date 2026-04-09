@@ -260,6 +260,15 @@ export async function loginToPanel(config: {
   // Navega para a página de login
   console.log(`  🌐 Acessando ${config.url}/#/login`);
   await page.goto(`${config.url}/#/login`, { waitUntil: 'networkidle2', timeout: 30000 });
+
+  // Espera o formulário de login aparecer
+  try {
+    await page.waitForSelector('.el-form, .login-form, form', { timeout: 10000 });
+    console.log('  ✅ Formulário de login detectado');
+  } catch {
+    console.log('  ⚠️ Formulário não encontrado diretamente, procurando inputs...');
+  }
+  
   await delay(2000);
 
   // Verifica se já está logado (cookies funcionaram)
@@ -279,7 +288,8 @@ export async function loginToPanel(config: {
 
     // Limpa campos antes de preencher
     const inputs = await page.$$('input.el-input__inner, input[type="text"], input[type="password"]');
-    if (inputs.length >= 3) {
+    console.log(`  📋 Inputs encontrados: ${inputs.length}`);
+    if (inputs.length >= 2) {
       for (const input of inputs) {
           await input.click({ clickCount: 3 });
           await page.keyboard.press('Backspace');
