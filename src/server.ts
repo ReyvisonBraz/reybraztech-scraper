@@ -142,9 +142,9 @@ function updateJob(job: Job): void {
 // ─── Run full scraper ─────────────────────────────────────────────────────────
 async function runScraper(): Promise<{ success: boolean; clients: number; stats?: any; error?: string }> {
   return new Promise(resolve => {
-    // In dev: __dirname = scraper/src, projectRoot = scraper
-    // In prod: __dirname = scraper/dist/src, projectRoot = scraper
-    const projectRoot = path.resolve(__dirname, '../..');
+    // In dev: __dirname = scraper/dist, projectRoot = scraper
+    // In prod: __dirname = scraper/dist, projectRoot = scraper
+    const projectRoot = path.resolve(__dirname, '..');
     const child = spawn('node', ['dist/index.js', '--sync'], {
       cwd: projectRoot,
       env: { ...process.env },
@@ -210,7 +210,7 @@ async function runScraper(): Promise<{ success: boolean; clients: number; stats?
 // ─── Search single client ─────────────────────────────────────────────────────
 async function runSearch(query: string, searchBy: string): Promise<{ success: boolean; data?: any; error?: string }> {
   return new Promise(resolve => {
-    const projectRoot = path.resolve(__dirname, '../..');
+    const projectRoot = path.resolve(__dirname, '..');
     const args = ['--search=' + query];
     if (searchBy !== 'account') args.push('--by=' + (searchBy === 'buyer_name' ? 'name' : searchBy));
 
