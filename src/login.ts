@@ -289,7 +289,7 @@ export async function loginToPanel(config: {
     // Limpa campos antes de preencher
     const inputs = await page.$$('input.el-input__inner, input[type="text"], input[type="password"]');
     console.log(`  📋 Inputs encontrados: ${inputs.length}`);
-    if (inputs.length >= 2) {
+    if (inputs.length >= 3) {
       for (const input of inputs) {
           await input.click({ clickCount: 3 });
           await page.keyboard.press('Backspace');
