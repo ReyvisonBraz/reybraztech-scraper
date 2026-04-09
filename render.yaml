@@ -5,7 +5,7 @@ services:
     region: oregon
     plan: free
     rootDir: .
-    buildCommand: npm install --include=dev && rm -rf /opt/render/.cache/puppeteer && npx puppeteer browsers install chrome && echo "Chrome installed:" && ls /opt/render/.cache/puppeteer && rm -rf dist && npm run build
+    buildCommand: PUPPETEER_CACHE_DIR=/opt/render/.cache/puppeteer npm install --include=dev && PUPPETEER_CACHE_DIR=/opt/render/.cache/puppeteer npx puppeteer browsers install chrome && echo "=== Chrome installed ===" && find /opt/render/.cache/puppeteer -name "chrome" -type f 2>/dev/null | head -5 && rm -rf dist && npm run build
     startCommand: npm start
     envVars:
       - key: NODE_ENV

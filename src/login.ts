@@ -214,6 +214,7 @@ export async function loginToPanel(config: {
 
   const launchOptions: Parameters<typeof puppeteer.launch>[0] = {
     headless: config.headless,
+    executablePath: isLinux ? puppeteer.executablePath() : undefined,
     defaultViewport: { width: 1280, height: 900 },
     timeout: 60000,
     args: [
