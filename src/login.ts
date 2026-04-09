@@ -219,7 +219,7 @@ export async function loginToPanel(config: {
     executablePath: chromePath,
     defaultViewport: { width: 1280, height: 900 },
     timeout: 60000,
-    args: [
+    args: isLinux ? chromium.args : [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
@@ -227,14 +227,6 @@ export async function loginToPanel(config: {
       '--disable-extensions',
       '--no-first-run',
       '--window-size=1280,900',
-      // Flags críticas para containers Linux (Render/Docker) — NÃO usar no Windows
-      ...(isLinux ? [
-        '--no-zygote',
-        '--single-process',
-        '--disable-software-rasterizer',
-        '--disable-background-networking',
-        '--disable-default-apps',
-      ] : []),
     ],
   };
 
