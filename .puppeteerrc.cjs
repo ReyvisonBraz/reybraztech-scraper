@@ -1,19 +1,17 @@
 /**
- * Configuração do Puppeteer para o ambiente Render (Linux).
+ * Configuração do Puppeteer.
  * Define o cache path onde o Chrome será instalado e encontrado.
  * 
- * No Render, o home é /opt/render/project e o cache por padrão é:
- * /opt/render/.cache/puppeteer
- * 
- * Usar a variável HOME garante compatibilidade local e em nuvem.
+ * No Render (Linux): usa PUPPETEER_CACHE_DIR do ambiente (/opt/render/.cache/puppeteer)
+ * No Windows/Mac: usa ~/.cache/puppeteer (padrão do SO)
  */
 const { join } = require('path');
 
+const isLinux = process.platform === 'linux';
+
 module.exports = {
-  // Pasta de cache onde o puppeteer vai instalar e procurar o Chrome
-  cacheDirectory: process.env.PUPPETEER_CACHE_DIR 
-    || join(process.env.HOME || '/opt/render', '.cache', 'puppeteer'),
+  cacheDirectory: (isLinux && process.env.PUPPETEER_CACHE_DIR)
+    || join(process.env.HOME || '', '.cache', 'puppeteer'),
   
-  // Desativa o download automático ao instalar o pacote (feito via postinstall)
   skipDownload: false,
 };

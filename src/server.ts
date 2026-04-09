@@ -145,7 +145,7 @@ async function runScraper(): Promise<{ success: boolean; clients: number; stats?
     // In dev: __dirname = scraper/src, projectRoot = scraper
     // In prod: __dirname = scraper/dist/src, projectRoot = scraper
     const projectRoot = path.resolve(__dirname, '../..');
-    const child = spawn('npx', ['ts-node', 'src/index.ts', '--sync'], {
+    const child = spawn('node', ['dist/index.js', '--sync'], {
       cwd: projectRoot,
       env: { ...process.env },
       shell: true,
@@ -214,7 +214,7 @@ async function runSearch(query: string, searchBy: string): Promise<{ success: bo
     const args = ['--search=' + query];
     if (searchBy !== 'account') args.push('--by=' + (searchBy === 'buyer_name' ? 'name' : searchBy));
 
-    const child = spawn('npx', ['ts-node', 'src/index.ts', ...args], {
+    const child = spawn('node', ['dist/index.js', ...args], {
       cwd: projectRoot, env: { ...process.env }, shell: true, stdio: ['pipe', 'pipe', 'pipe'],
     });
 
