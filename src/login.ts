@@ -1,5 +1,6 @@
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import chromium from '@sparticuz/chromium';
 import * as fs from 'fs';
 import * as path from 'path';
 import { solveCaptcha } from './captcha';
@@ -12,54 +13,6 @@ puppeteer.use(StealthPlugin());
 
 const COOKIES_DIR = path.join(__dirname, '..', 'cookies');
 const COOKIES_FILE = path.join(COOKIES_DIR, 'session.json');
-
-/** Encontra o executável do Chrome no diretório de cache do puppeteer */
-function findChromePath(): string | undefined {
-  const cacheDir = process.env.PUPPETEER_CACHE_DIR || path.join(process.env.HOME || '', '.cache', 'puppeteer');
-  const chromeDir = path.join(cacheDir, 'chrome');
-  
-  if (!fs.existsSync(chromeDir)) {
-    // Tenta o path padrão do Render
-    const renderChrome = '/opt/render/.cache/puppeteer/chrome';
-    if (fs.existsSync(renderChrome)) {
-      // Encontra qualquer subdir que contenha "chrome"
-      const items = fs.readdirSync(renderChrome);
-      for (const item of items) {
-        if (item.includes('chrome')) {
-          const exePath = path.join(renderChrome, item, 'chrome-linux64', 'chrome');
-          if (fs.existsSync(exePath)) return exePath;
-          // Tenta outro padrão
-          const exePath2 = path.join(renderChrome, item, 'chrome', 'chrome');
-          if (fs.existsSync(exePath2)) return exePath2;
-        }
-      }
-    }
-    return undefined;
-  }
-  
-  // Encontra a primeira pasta chrome-* e procura o executável
-  try {
-    const items = fs.readdirSync(chromeDir);
-    for (const item of items) {
-      if (item.startsWith('chrome') || item.includes('linux')) {
-        const chromeSubdir = path.join(chromeDir, item);
-        const stat = fs.statSync(chromeSubdir);
-        if (stat.isDirectory()) {
-          // Linux Chrome typical structure
-          const exe1 = path.join(chromeSubdir, 'chrome-linux64', 'chrome');
-          if (fs.existsSync(exe1)) return exe1;
-          const exe2 = path.join(chromeSubdir, 'chrome', 'chrome');
-          if (fs.existsSync(exe2)) return exe2;
-          const exe3 = path.join(chromeSubdir, item.replace('_', '-'), 'chrome');
-          if (fs.existsSync(exe3)) return exe3;
-        }
-      }
-    }
-  } catch {}
-  
-  // Fallback: usa o executablePath padrão do puppeteer
-  return puppeteer.executablePath();
-}
 
 /** Espera um tempo fixo mínimo mais um valor aleatório para simular lentidão humana */
 function humanDelay(minMs: number = 300, maxMs: number = 1200): Promise<void> {
@@ -259,10 +212,11 @@ export async function loginToPanel(config: {
   console.log('\n🚀 Iniciando login no painel StarHome...\n');
 
   const isLinux = process.platform === 'linux';
+  const chromePath = isLinux ? await chromium.executablePath() : undefined;
 
   const launchOptions: Parameters<typeof puppeteer.launch>[0] = {
     headless: config.headless,
-    executablePath: isLinux ? findChromePath() : undefined,
+    executablePath: chromePath,
     defaultViewport: { width: 1280, height: 900 },
     timeout: 60000,
     args: [
