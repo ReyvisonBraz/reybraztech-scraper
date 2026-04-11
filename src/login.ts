@@ -265,7 +265,7 @@ export async function loginToPanel(config: {
 
   // Espera o formulário de login aparecer
   try {
-    await page.waitForSelector('.el-form, .login-form, form', { timeout: 10000 });
+    await page.waitForSelector('.el-form, .login-form, form', { timeout: 20000 });
     console.log('  ✅ Formulário de login detectado');
   } catch {
     console.log('  ⚠️ Formulário não encontrado diretamente, procurando inputs...');
@@ -360,7 +360,19 @@ export async function loginToPanel(config: {
         await delay(2000); // Aguarda nova imagem carregar
       }
     } else {
-        console.log('    ❌ Não encontrei os campos de input de login.');
+        console.log(`    ❌ Encontrados apenas ${inputs.length} campos de input ao invés de 3.`);
+        console.log('    📸 Tirando screenshot da tela para ver o erro (Cloudflare block?)...');
+        const errPath = path.join(__dirname, '..', 'output', `login_error_view.png`);
+        await page.screenshot({ path: errPath, fullPage: true });
+        
+        try {
+          const { sendCaptchaToTelegram } = await import('./telegram');
+          await sendCaptchaToTelegram(
+             errPath, 
+             `🚨 <b>Alerta do Scraper!</b>\nNão consegui encontrar os formulários de login do painel.\nIsso geralmente significa que a página demorou muito para carregar ou o Cloudflare barrou (IP do Render).\n\nAqui está exatamente o que o bot está "vendo" agora:`
+          );
+        } catch(e) {}
+        
         break;
     }
   }
