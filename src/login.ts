@@ -319,6 +319,9 @@ export async function loginToPanel(config: {
       }
 
       // Preenche os campos de forma "humana"
+      const { sendTelegramMessage } = await import('./telegram');
+      await sendTelegramMessage('🤖 <b>Automação:</b> Preenchendo dados de login no painel...');
+      
       await humanDelay(500, 1500);
       await inputs[0].click();
       await inputs[0].type(config.account, { delay: Math.floor(Math.random() * 50) + 50 });
@@ -329,6 +332,7 @@ export async function loginToPanel(config: {
       await inputs[1].type(config.password, { delay: Math.floor(Math.random() * 50) + 40 });
       console.log('    ✅ Password preenchido');
 
+      await sendTelegramMessage('🧩 <b>Automação:</b> Extraindo e resolvendo o Captcha do painel...');
       // Tenta resolver o captcha
       const captchaCode = await solveCaptcha(page);
       await humanDelay(300, 800);
@@ -347,6 +351,7 @@ export async function loginToPanel(config: {
 
       // Clica no Login
       console.log('    🔑 Clicando em Login...');
+      await sendTelegramMessage('🔑 <b>Automação:</b> Clique de Login disparado. Aguardando resposta do Starhome...');
       const btns = await page.$$('button');
       for (const btn of btns) {
         const text = await btn.evaluate((el: Element) => el.textContent || '');
