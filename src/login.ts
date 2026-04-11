@@ -150,7 +150,8 @@ async function handle2FA(page: Page): Promise<boolean> {
   const code = (await waitForTelegramReply(300000, 'código 2FA (SMS)')) ?? '';
 
   if (!code) {
-    console.log('  ⚠️  Nenhum código recebido. Tentando continuar sem 2FA...');
+    console.log('  ⚠️  Nenhum código recebido. Cancelando tentativa de 2FA...');
+    return false;
   }
 
   // Encontra o campo de input do código e preenche
