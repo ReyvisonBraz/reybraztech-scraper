@@ -210,31 +210,48 @@ export async function loginToPanel(config: {
   account: string;
   password: string;
   headless: boolean;
+  proxy?: string; // Ex: http://ip:port
+  proxyAuth?: { username: string; password: string; };
 }): Promise<{ browser: Browser; page: Page }> {
   console.log('\n🚀 Iniciando login no painel StarHome...\n');
 
   const isLinux = process.platform === 'linux';
   const chromePath = isLinux ? await chromium.executablePath() : undefined;
 
+  let args = isLinux ? chromium.args : [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--disable-extensions',
+    '--no-first-run',
+    '--window-size=1280,900',
+  ];
+
+  // Adiciona Proxy se configurado (ótimo para contornar bloqueios de IP como Cloudflare)
+  if (config.proxy) {
+    const proxyArg = `--proxy-server=${config.proxy}`;
+    args.push(proxyArg);
+  }
+
   const launchOptions: Parameters<typeof puppeteer.launch>[0] = {
     headless: config.headless,
     executablePath: chromePath,
     defaultViewport: { width: 1280, height: 900 },
     timeout: 60000,
-    args: isLinux ? chromium.args : [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--disable-extensions',
-      '--no-first-run',
-      '--window-size=1280,900',
-    ],
+    args: args,
   };
 
   const browser = await puppeteer.launch(launchOptions);
-
-  const page = await browser.newPage();
+  let page = await browser.newPage();
+  
+  // Autenticação do proxy, caso seja proxy privado
+  if (config.proxyAuth && config.proxyAuth.username) {
+    await page.authenticate({ 
+      username: config.proxyAuth.username, 
+      password: config.proxyAuth.password 
+    });
+  }
 
   // User agent realista e atualizado
   await page.setUserAgent(
@@ -261,7 +278,11 @@ export async function loginToPanel(config: {
 
   // Navega para a página de login
   console.log(`  🌐 Acessando ${config.url}/#/login`);
-  await page.goto(`${config.url}/#/login`, { waitUntil: 'networkidle2', timeout: 30000 });
+  try {
+    await page.goto(`${config.url}/#/login`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  } catch (err: any) {
+    console.log(`  ⚠️ Aviso no page.goto: ${err.message}. Tentando prosseguir mesmo assim...`);
+  }
 
   // Espera o formulário de login aparecer
   try {

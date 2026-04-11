@@ -49,6 +49,9 @@ export async function runScraper() {
     password: process.env.PANEL_PASSWORD || '',
     headless: process.env.HEADLESS === 'true',
     itemsPerPage: parseInt(process.env.ITEMS_PER_PAGE || '100'),
+    proxyServer: process.env.PROXY_SERVER || '',
+    proxyUser: process.env.PROXY_USERNAME || '',
+    proxyPass: process.env.PROXY_PASSWORD || '',
   };
 
   if (!config.account || !config.password) {
@@ -82,6 +85,8 @@ export async function runScraper() {
       account: config.account,
       password: config.password,
       headless: config.headless,
+      proxy: config.proxyServer ? config.proxyServer : undefined,
+      proxyAuth: config.proxyUser ? { username: config.proxyUser, password: config.proxyPass } : undefined,
     });
     browser = session.browser;
 
