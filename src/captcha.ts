@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { Page, ElementHandle } from 'puppeteer';
 import { Solver } from '@2captcha/captcha-solver';
-import { askCaptchaTerminal } from './telegram';
+import { askCaptchaTerminal, sendCaptchaToTelegram, waitForCaptchaFromTelegram } from './telegram';
 
 // NOTA: A API key é lida dinamicamente dentro das funções para garantir
 // que o dotenv.config() já foi executado antes desta variável ser acessada.
@@ -166,8 +166,8 @@ export async function solveCaptcha(page: Page): Promise<string> {
   }
 
   if (!captchaElement) {
-    console.log('  ❌ Captcha não encontrado. Digitação manual necessária.');
-    return await askCaptchaTerminal();
+    console.log('  ❌ Captcha não encontrado no DOM HTML.');
+    return '0000'; // Força um código falso para ele dar erro, recarregar a tela e tentar de novo
   }
 
   // Garante que o diretório de output existe
@@ -186,11 +186,17 @@ export async function solveCaptcha(page: Page): Promise<string> {
     return code2Captcha;
   }
 
-  // Fallback final: pede ao usuário no terminal
-  console.log('  🔄 Fallback: inserção manual no terminal...');
-  console.log(`\n  📷 Veja o captcha em: ${captchaPath}`);
-  console.log('  📺 O navegador está aberto — veja o captcha na tela.\n');
-  const manualCode = await askCaptchaTerminal();
-  console.log(`  ✅ Código inserido manualmente: ${manualCode}`);
-  return manualCode;
+  // Fallback final: pede ao usuário no Telegram em vez de travar o terminal
+  console.log('  🔄 Fallback 2Captcha falhou: Encaminhando imagem pro Telegram...');
+  
+  await sendCaptchaToTelegram(captchaPath, '🚨 <b>Captcha Falhou (2Captcha com Erro)</b>\nPor favor, digite os 4 números da imagem:');
+  const manualCode = await waitForCaptchaFromTelegram(180000); // 3 minutos de timeout
+  
+  if (manualCode) {
+    console.log(`  ✅ Código recebido pelo Telegram: ${manualCode}`);
+    return manualCode;
+  }
+  
+  console.log('  ⚠️ Nenhum código digitado a tempo no Telegram. Tentando "0000" para forçar refresh...');
+  return '0000';
 }
