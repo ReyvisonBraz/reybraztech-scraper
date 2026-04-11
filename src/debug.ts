@@ -59,7 +59,7 @@ async function debugHTML() {
   askForSnap();
 
   // Mantém o processo vivo até CTRL+C
-  await new Promise(() => {});
+  await new Promise(() => { });
 }
 
 debugHTML().catch(console.error);

@@ -137,15 +137,17 @@ async function handle2FA(page: Page): Promise<boolean> {
   }
 
   // PASSO 2: Notifica pelo Telegram (aviso apenas, não espera resposta)
-  await sendTelegramMessage(
-    '🔐 <b>Código 2FA necessário!</b>\n\n' +
-    'O painel StarHome detectou um novo dispositivo.\n' +
-    '📱 O SMS/e-mail já foi disparado pelo painel.\n\n' +
-    '<b>Acesse o painel Admin → Console e use o campo 2FA</b>'
-  ).catch(() => {}); // Não bloqueia se Telegram falhar
+  const { waitForTelegramReply } = await import('./telegram');
 
-  // Aguarda 2FA via arquivo compartilhado (painel Admin) ou terminal (local)
-  const code = (await waitFor2FACode(300000, 'código 2FA')) ?? '';
+  await sendTelegramMessage(
+    '🔐 <b>Código 2FA (SMS) necessário!</b>\n\n' +
+    'O painel StarHome detectou um novo dispositivo.\n' +
+    '📱 O SMS/e-mail (código) já foi disparado pelo chip/painel.\n\n' +
+    '➡️ <b>Por favor, digite o código de 6 dígitos que você recebeu aqui.</b>'
+  ).catch(() => {});
+
+  // Aguarda 2FA pelo Telegram diretamente (ou terminal se não configurado)
+  const code = (await waitForTelegramReply(300000, 'código 2FA (SMS)')) ?? '';
 
   if (!code) {
     console.log('  ⚠️  Nenhum código recebido. Tentando continuar sem 2FA...');

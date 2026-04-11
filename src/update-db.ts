@@ -71,6 +71,12 @@ export async function updateDatabase(clients: ClientData[]) {
 
       let existingId: number | null = null;
       let matchType = '';
+      let phoneFound = '';
+
+      if (client.buyer_name) {
+        const phoneMatch = client.buyer_name.match(/\d{10,11}/);
+        if (phoneMatch) phoneFound = phoneMatch[0];
+      }
 
       // 1º: Buscar pelo starhome_account (se já vinculado anteriormente)
       if (client.account) {
@@ -112,40 +118,62 @@ export async function updateDatabase(clients: ClientData[]) {
       }
 
       // 4º: Buscar por telefone no formato StarHome (buyer_name pode conter telefone)
-      if (!existingId && client.buyer_name) {
-        // Extrair números de telefone do buyer_name
-        const phoneMatch = client.buyer_name.match(/\d{10,11}/);
-        if (phoneMatch) {
-          const phone = phoneMatch[0];
-          const [byPhone] = await getDb()`
-            SELECT id FROM clients 
-            WHERE whatsapp LIKE ${`%${phone}%`}
-            LIMIT 1
-          `;
-          if (byPhone) {
-            existingId = byPhone.id;
-            matchType = 'telefone';
-          }
+      if (!existingId && phoneFound) {
+        const [byPhone] = await getDb()`
+          SELECT id FROM clients 
+          WHERE whatsapp LIKE ${`%${phoneFound}%`}
+          LIMIT 1
+        `;
+        if (byPhone) {
+          existingId = byPhone.id;
+          matchType = 'telefone';
         }
       }
 
       if (existingId) {
-        // Atualiza TODOS os campos do StarHome
+        // Atualiza campos do app (StarHome info)
         await getDb()`
           UPDATE clients SET
             starhome_account = ${client.account},
-            starhome_password_hash = ${passwordHash},
-            starhome_days_remaining = ${client.days_remaining},
-            starhome_package = ${client.package_name},
-            starhome_in_use = ${starhomeStatus},
-            starhome_expiration_date = ${client.expiration_date || null},
-            starhome_last_sync = NOW()
+            app_account = ${client.account},
+            app_password = ${client.password},
+            days_remaining = ${client.days_remaining},
+            plan = ${client.package_name},
+            status = ${starhomeStatus}
           WHERE id = ${existingId}
         `;
         console.log(`   ✅ ${client.buyer_name || client.account} → vinculado (${matchType})`);
         updated++;
       } else {
-        console.log(`   ⏭️  Não encontrado: ${client.account} (${client.buyer_name || 'sem nome'})`);
+        // INSERE se não existir
+        await getDb()`
+          INSERT INTO clients (
+            name,
+            whatsapp,
+            device,
+            email,
+            password_hash,
+            starhome_account,
+            app_account,
+            app_password,
+            days_remaining,
+            plan,
+            status
+          ) VALUES (
+            ${client.buyer_name || `Cliente (${client.account})`},
+            ${phoneFound || ''},
+            '',
+            '',
+            '',
+            ${client.account},
+            ${client.account},
+            ${client.password},
+            ${client.days_remaining},
+            ${client.package_name},
+            ${starhomeStatus}
+          )
+        `;
+        console.log(`   ➕ Novo cadastrado: ${client.account} (${client.buyer_name || 'sem nome'})`);
         notFound++;
       }
 
