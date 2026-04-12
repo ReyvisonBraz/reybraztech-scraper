@@ -112,7 +112,42 @@ async function handle2FA(page: Page): Promise<boolean> {
 
   console.log('\n  🔒 Verificação de 2FA detectada! (Dispositivo / Navegador desconhecido)');
 
-  // PASSO 1: Clica no botão "Send" para o sistema disparar o SMS/e-mail
+  // PASSO 1: Selecionar a opção de E-mail
+  try {
+    console.log('  🔄 Tentando selecionar a opção de E-mail invés de SMS...');
+    
+    // Tenta primeiro abrir um possível dropdown de tipo de verificação
+    const verifyMethodInputs = await page.$$('.el-select');
+    if (verifyMethodInputs.length > 0) {
+      await verifyMethodInputs[0].click().catch(() => {});
+      await new Promise(r => setTimeout(r, 800)); // Espera a animação do dropdown
+    }
+
+    // Procura a opção "Email" ou "E-mail" para clicar
+    const elementsWithEmail = await page.$$('li.el-select-dropdown__item, span, label, div.el-radio, span.el-radio__label');
+    for (const el of elementsWithEmail) {
+      const text = await el.evaluate(e => e.textContent || '');
+      const hasEmailText = text.toLowerCase().includes('email') || text.toLowerCase().includes('e-mail');
+      const isShort = text.trim().length < 40; // Evita clicar em divs gigantes que contêm a palavra
+      
+      if (hasEmailText && isShort) {
+        const isVisible = await el.evaluate((e: any) => {
+          const s = window.getComputedStyle(e);
+          return s.display !== 'none' && s.visibility !== 'hidden' && e.getBoundingClientRect().height > 0 && e.getBoundingClientRect().width > 0;
+        });
+        if (isVisible) {
+          await (el as any).click();
+          console.log('  📧 Opção de E-mail selecionada com sucesso!');
+          await new Promise(r => setTimeout(r, 800));
+          break;
+        }
+      }
+    }
+  } catch (err) {
+    console.log('  ⚠️ Não foi possível selecionar Email automaticamente (ou já estava selecionado).');
+  }
+
+  // PASSO 2: Clica no botão "Send" para o sistema disparar o e-mail
   let sendClicked = false;
   const allButtons = await page.$$('button, span.text-primary, a.text-primary');
   for (const btn of allButtons) {
@@ -124,7 +159,7 @@ async function handle2FA(page: Page): Promise<boolean> {
       });
       if (isVisible) {
         await (btn as any).click();
-        console.log('  📤 Botão "Send" clicado — SMS/e-mail sendo enviado pelo painel...');
+        console.log('  📤 Botão "Send" clicado — E-mail sendo enviado pelo painel...');
         sendClicked = true;
         await new Promise(r => setTimeout(r, 1500));
         break;
@@ -136,18 +171,18 @@ async function handle2FA(page: Page): Promise<boolean> {
     console.log('  ⚠️  Botão "Send" não encontrado — o painel pode já ter enviado o código.');
   }
 
-  // PASSO 2: Notifica pelo Telegram (aviso apenas, não espera resposta)
+  // PASSO 3: Notifica pelo Telegram (aviso apenas, não espera resposta)
   const { waitForTelegramReply } = await import('./telegram');
 
   await sendTelegramMessage(
-    '🔐 <b>Código 2FA (SMS) necessário!</b>\n\n' +
+    '🔐 <b>Código 2FA (E-mail) necessário!</b>\n\n' +
     'O painel StarHome detectou um novo dispositivo.\n' +
-    '📱 O SMS/e-mail (código) já foi disparado pelo chip/painel.\n\n' +
-    '➡️ <b>Por favor, digite o código de 6 dígitos que você recebeu aqui.</b>'
+    '📧 O e-mail com o código de acesso já foi disparado pelo painel.\n\n' +
+    '➡️ <b>Por favor, digite o código de 6 dígitos que recebeu no e-mail aqui.</b>'
   ).catch(() => {});
 
   // Aguarda 2FA pelo Telegram diretamente (ou terminal se não configurado)
-  const code = (await waitForTelegramReply(300000, 'código 2FA (SMS)')) ?? '';
+  const code = (await waitForTelegramReply(300000, 'código 2FA (E-mail)')) ?? '';
 
   if (!code) {
     console.log('  ⚠️  Nenhum código recebido. Cancelando tentativa de 2FA...');
