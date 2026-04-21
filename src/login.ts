@@ -252,7 +252,9 @@ export async function loginToPanel(config: {
   console.log('\n🚀 Iniciando login no painel StarHome...\n');
 
   const isLinux = process.platform === 'linux';
-  const chromePath = isLinux ? await chromium.executablePath() : undefined;
+  // PUPPETEER_EXECUTABLE_PATH tem prioridade (necessário no Render)
+  const chromePath = process.env.PUPPETEER_EXECUTABLE_PATH
+    || (isLinux ? await chromium.executablePath() : undefined);
 
   let args = isLinux ? chromium.args : [
     '--no-sandbox',

@@ -12,6 +12,8 @@ interface ClientData {
   in_use: string;
   expired: string;
   expiration_date: string | null;
+  first_login?: string | null;
+  creation_time?: string | null;
 }
 
 // ── Conexão lazy: só conecta quando updateDatabase() é chamada ──────────────
@@ -130,16 +132,23 @@ export async function updateDatabase(clients: ClientData[]) {
         }
       }
 
+      const now = new Date();
+      const expirationDate = client.expiration_date ? new Date(client.expiration_date) : null;
+
       if (existingId) {
-        // Atualiza campos do app (StarHome info)
         await getDb()`
           UPDATE clients SET
-            starhome_account = ${client.account},
-            app_account = ${client.account},
-            app_password = ${client.password},
-            days_remaining = ${client.days_remaining},
-            plan = ${client.package_name},
-            status = ${starhomeStatus}
+            starhome_account         = ${client.account},
+            app_account              = ${client.account},
+            app_password             = ${client.password},
+            days_remaining           = ${client.days_remaining},
+            plan                     = ${client.package_name},
+            status                   = ${starhomeStatus},
+            starhome_days_remaining  = ${client.days_remaining},
+            starhome_in_use          = ${client.in_use},
+            starhome_package         = ${client.package_name},
+            starhome_expiration_date = ${expirationDate},
+            starhome_last_sync       = ${now}
           WHERE id = ${existingId}
         `;
         console.log(`   ✅ ${client.buyer_name || client.account} → vinculado (${matchType})`);
@@ -158,7 +167,12 @@ export async function updateDatabase(clients: ClientData[]) {
             app_password,
             days_remaining,
             plan,
-            status
+            status,
+            starhome_days_remaining,
+            starhome_in_use,
+            starhome_package,
+            starhome_expiration_date,
+            starhome_last_sync
           ) VALUES (
             ${client.buyer_name || `Cliente (${client.account})`},
             ${phoneFound || ''},
@@ -170,7 +184,12 @@ export async function updateDatabase(clients: ClientData[]) {
             ${client.password},
             ${client.days_remaining},
             ${client.package_name},
-            ${starhomeStatus}
+            ${starhomeStatus},
+            ${client.days_remaining},
+            ${client.in_use},
+            ${client.package_name},
+            ${expirationDate},
+            ${now}
           )
         `;
         console.log(`   ➕ Novo cadastrado: ${client.account} (${client.buyer_name || 'sem nome'})`);
