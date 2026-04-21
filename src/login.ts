@@ -383,14 +383,25 @@ export async function loginToPanel(config: {
     console.log('  ⚠️ Formulário não encontrado diretamente, procurando inputs...');
   }
 
-  await delay(2000);
+  // Verifica se a SPA redirecionou para fora do login (cookies válidos)
+  // Usa waitForFunction para aguardar o hash routing completar (até 10s)
+  let alreadyLoggedIn = false;
+  try {
+    await page.waitForFunction(
+      () => !window.location.href.includes('login'),
+      { timeout: 10000, polling: 500 }
+    );
+    alreadyLoggedIn = true;
+  } catch {
+    // Ainda na tela de login — precisa preencher o formulário
+  }
 
-  // Verifica se já está logado (cookies funcionaram)
-  const currentUrl = page.url();
-  if (!currentUrl.includes('login')) {
+  if (alreadyLoggedIn) {
     console.log('  ✅ Já autenticado via cookies salvos!');
     return { browser, page };
   }
+
+  await delay(1000);
 
   let loginSuccessful = false;
   let loginAttempts = 0;
@@ -400,8 +411,8 @@ export async function loginToPanel(config: {
     loginAttempts++;
     console.log(`\n  📝 [Tentativa ${loginAttempts}/${maxLoginAttempts}] Preenchendo formulário de login...`);
 
-    // Limpa campos antes de preencher
-    const inputs = await page.$$('input.el-input__inner, input[type="text"], input[type="password"]');
+    // Limpa campos antes de preencher (suporta ElementUI e Ant Design)
+    const inputs = await page.$$('input.el-input__inner, input.ant-input, input[type="text"], input[type="password"]');
     console.log(`  📋 Inputs encontrados: ${inputs.length}`);
     if (inputs.length >= 3) {
       for (const input of inputs) {
