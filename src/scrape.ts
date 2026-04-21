@@ -103,51 +103,59 @@ export async function scrapeClients(page: Page, itemsPerPage: number = 100): Pro
  * Configura a quantidade de itens por página.
  */
 async function setItemsPerPage(page: Page, items: number): Promise<void> {
-  console.log(`  🔍 Rolando para o rodapé e buscando componente ElementUI para a quantia de ${items}...`);
+  console.log(`  🔍 Configurando ${items} itens por página...`);
   try {
-    // Força o viewport exibir toda a janela para que a paginação apareça
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     await delay(1000);
 
-    const pageSizeSelectors = [
-      '.ant-pagination-options-size-changer', // Ant Design
-      '.ant-select-selector', // Ant Design genérico
-      '.el-pagination__sizes .el-select',
-      '.el-pagination .el-select',
-    ];
-
-    for (const selector of pageSizeSelectors) {
-      const dropdown = await page.$(selector);
-      if (dropdown) {
-        // Encontrou a caixa sem prever pixels na tela; ele acha o Elemento
-        await dropdown.click();
-        console.log(`  🎯 Elemento clique exato: ${selector}`);
-        await delay(1000); // Animação renderizar o popover
-
-        // Pega as opções renderedas no HTML
-        const options = await page.$$('li.el-select-dropdown__item span, .ant-select-item-option-content');
-        let configFeita = false;
-        
-        for (const option of options) {
-          const text = await option.evaluate((el: Element) => el.textContent || '');
-          if (text.includes(String(items)) || text.includes('100')) {
-            // Sem coordenadas XY; o driver calcula e atira no centro desse 'span'
-            await option.click();
-            console.log(`  📐 Clicado no node: ${text.trim()}`);
-            configFeita = true;
-            await delay(3000); // Carrega os 100 itens da rede (backend deles)
-            break;
-          }
+    // Encontra o .ant-select-selector cujo .ant-select-selection-item contém número de página (ex: "10", "20")
+    const sizeChanger = await page.evaluateHandle(() => {
+      const items = document.querySelectorAll('.ant-select-selection-item');
+      for (const item of Array.from(items)) {
+        const text = (item.textContent || '').trim();
+        if (/^\d+/.test(text)) { // começa com número = seletor de tamanho
+          return item.closest('.ant-select-selector') as HTMLElement | null;
         }
-        
-        if (configFeita) return;
+      }
+      return null;
+    });
+
+    const el = sizeChanger.asElement() as any;
+    if (!el) {
+      const allItems = await page.$$eval('.ant-select-selection-item', els => els.map(e => e.textContent?.trim()));
+      console.log(`  ⚠️  Seletor de tamanho não encontrado. selection-items na página: ${JSON.stringify(allItems)}`);
+      return;
+    }
+
+    await el.click();
+    console.log('  🎯 Dropdown de tamanho de página aberto');
+
+    // Aguarda o portal aparecer
+    await page.waitForSelector('.ant-select-dropdown:not(.ant-select-dropdown-hidden)', { timeout: 5000 }).catch(() => {});
+    await delay(500);
+
+    // Log de todas as opções visíveis para debug
+    const options = await page.$$('.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option');
+    const optionTexts = await Promise.all(options.map(o => o.evaluate((el: Element) => el.textContent?.trim() || '')));
+    console.log(`  📋 Opções disponíveis: ${JSON.stringify(optionTexts)}`);
+
+    let found = false;
+    for (let i = 0; i < options.length; i++) {
+      if (optionTexts[i].includes(String(items))) {
+        await options[i].click();
+        console.log(`  📐 Selecionado: "${optionTexts[i]}"`);
+        found = true;
+        await delay(3000);
         break;
       }
     }
 
-    console.log('  ℹ️  Seletor el-pagination__sizes não encontrado, usando visualização padrão.');
+    if (!found) {
+      console.log(`  ⚠️  Opção "${items}" não encontrada. Fechando dropdown.`);
+      await page.keyboard.press('Escape');
+    }
   } catch (error) {
-    console.log(`  ⚠️  Erro no DOM durante click da paginação: ${error}`);
+    console.log(`  ⚠️  Erro ao configurar itens por página: ${error}`);
   }
 }
 

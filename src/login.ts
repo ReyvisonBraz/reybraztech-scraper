@@ -252,9 +252,51 @@ export async function loginToPanel(config: {
   console.log('\n🚀 Iniciando login no painel StarHome...\n');
 
   const isLinux = process.platform === 'linux';
-  // PUPPETEER_EXECUTABLE_PATH tem prioridade (necessário no Render)
-  const chromePath = process.env.PUPPETEER_EXECUTABLE_PATH
-    || (isLinux ? await chromium.executablePath() : undefined);
+  let chromePath: string | undefined;
+
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    chromePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+    console.log(`  🔧 Chrome path (env): ${chromePath}`);
+  } else if (isLinux) {
+    // Tenta o puppeteer built-in primeiro (instalado pelo postinstall)
+    try {
+      const puppeteerCore = await import('puppeteer');
+      const builtInPath = puppeteerCore.default.executablePath();
+      if (builtInPath && fs.existsSync(builtInPath)) {
+        chromePath = builtInPath;
+        console.log(`  🔧 Chrome path (puppeteer built-in): ${chromePath}`);
+      }
+    } catch {}
+
+    // Fallback: @sparticuz/chromium (empacotado para serverless)
+    if (!chromePath) {
+      try {
+        chromePath = await chromium.executablePath();
+        console.log(`  🔧 Chrome path (@sparticuz/chromium): ${chromePath}`);
+      } catch {}
+    }
+
+    // Fallback final: paths conhecidos do Render/Debian
+    if (!chromePath) {
+      const knownPaths = [
+        '/opt/render/.cache/puppeteer/chrome/linux-*/chrome-linux64/chrome',
+        '/usr/bin/google-chrome',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+      ];
+      for (const p of knownPaths) {
+        if (fs.existsSync(p)) {
+          chromePath = p;
+          console.log(`  🔧 Chrome path (known fallback): ${chromePath}`);
+          break;
+        }
+      }
+    }
+
+    if (!chromePath) {
+      console.log('  ⚠️  Chrome não encontrado em nenhum path conhecido. Deixando puppeteer resolver automaticamente.');
+    }
+  }
 
   let args = isLinux ? chromium.args : [
     '--no-sandbox',

@@ -175,7 +175,7 @@ export async function updateDatabase(clients: ClientData[]) {
             starhome_last_sync
           ) VALUES (
             ${client.buyer_name || `Cliente (${client.account})`},
-            ${phoneFound || ''},
+            ${phoneFound || null},
             '',
             '',
             '',
