@@ -4,11 +4,13 @@ import { loginToPanel } from './login';
 import { scrapeClients, searchAndExtractClient } from './scrape';
 import { exportAll } from './export';
 import { updateDatabase } from './update-db';
+import { renewClient } from './renew';
 
 function parseArgs() {
   const args = process.argv.slice(2);
   const config = {
     search: '',
+    renew: '',
     searchBy: 'account' as 'account' | 'buyer_name' | 'phone',
     sync: false,
   };
@@ -19,6 +21,8 @@ function parseArgs() {
     } else if (arg.startsWith('--search ') || arg.startsWith('--search')) {
       const match = arg.match(/--search\s+(.+)/);
       if (match) config.search = match[1].trim();
+    } else if (arg.startsWith('--renew=')) {
+      config.renew = arg.replace('--renew=', '').trim();
     } else if (arg.startsWith('--by=')) {
       const by = arg.replace('--by=', '').trim().toLowerCase();
       if (by === 'nome' || by === 'name' || by === 'buyer_name') config.searchBy = 'buyer_name';
@@ -68,11 +72,16 @@ export async function runScraper() {
     console.log(`\n🔍 Modo BUSCA RÁPIDA:`);
     console.log(`   Query: "${args.search}"`);
     console.log(`   Tipo: ${args.searchBy}`);
+  } else if (args.renew) {
+    console.log(`\n🔄 Modo RENOVAÇÃO:`);
+    console.log(`   Query: "${args.renew}"`);
+    console.log(`   Tipo: ${args.searchBy}`);
   } else if (args.sync) {
     console.log(`\n🔄 Modo SINCRONIZAÇÃO COMPLETA:`);
   } else {
-    console.log(`\n⚠️  Nenhum modo especificado. Use --search ou --sync`);
+    console.log(`\n⚠️  Nenhum modo especificado. Use --search, --renew ou --sync`);
     console.log(`   Exemplo: npm run scraper -- --search=conta123`);
+    console.log(`   Exemplo: npm run scraper -- --renew="João Silva" --by=name`);
     console.log(`   Exemplo: npm run scraper -- --sync`);
     return [];
   }
@@ -91,6 +100,35 @@ export async function runScraper() {
     browser = session.browser;
 
     let clients: any[] = [];
+
+    if (args.renew) {
+      const searchBy = args.searchBy === 'account' ? 'buyer_name' : args.searchBy;
+      const client = await searchAndExtractClient(session.page, args.renew, searchBy);
+      if (!client) {
+        console.log(`\n❌ Cliente não encontrado: "${args.renew}"`);
+        const fs = await import('fs');
+        const outputPath = path.join(__dirname, '..', 'output', 'renew_result.json');
+        fs.writeFileSync(outputPath, JSON.stringify({ success: false, error: `Cliente não encontrado: "${args.renew}"` }, null, 2));
+        return [];
+      }
+
+      console.log(`\n✅ Cliente encontrado: ${client.buyer_name} (${client.account})`);
+      console.log(`   Dias restantes: ${client.days_remaining} | Status: ${client.in_use}`);
+      console.log(`\n🔄 Iniciando renovação...`);
+
+      const success = await renewClient(session.page, client.account);
+      const fs = await import('fs');
+      const outputPath = path.join(__dirname, '..', 'output', 'renew_result.json');
+
+      if (success) {
+        console.log(`\n✅ Renovação concluída: ${client.buyer_name} (${client.account})`);
+        fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: client.account, clientName: client.buyer_name }, null, 2));
+      } else {
+        console.log(`\n❌ Falha na renovação de: ${client.buyer_name} (${client.account})`);
+        fs.writeFileSync(outputPath, JSON.stringify({ success: false, account: client.account, clientName: client.buyer_name, error: 'Processo de renovação falhou no painel' }, null, 2));
+      }
+      return [];
+    }
 
     if (args.search) {
       const client = await searchAndExtractClient(session.page, args.search, args.searchBy);

@@ -207,6 +207,46 @@ async function runScraper(): Promise<{ success: boolean; clients: number; stats?
   });
 }
 
+// ─── Renew single client ──────────────────────────────────────────────────────
+async function runRenew(query: string, searchBy: string): Promise<{ success: boolean; account?: string; clientName?: string; error?: string }> {
+  return new Promise(resolve => {
+    const projectRoot = path.resolve(__dirname, '..');
+    const args = ['--renew=' + query];
+    if (searchBy !== 'account') args.push('--by=' + (searchBy === 'buyer_name' ? 'name' : searchBy));
+
+    const child = spawn('node', ['dist/index.js', ...args], {
+      cwd: projectRoot, env: { ...process.env }, shell: true, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    activeScraperPid = child.pid || null;
+
+    let stderr = '';
+    child.stdout.on('data', (d: Buffer) => log('info', 'renew stdout', { chunk: d.toString().slice(0, 200) }));
+    child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+
+    child.on('close', (code: number) => {
+      activeScraperPid = null;
+      if (code !== 0) { resolve({ success: false, error: stderr.slice(-500) }); return; }
+      try {
+        const jsonPath = path.join(__dirname, '..', 'output', 'renew_result.json');
+        if (fs.existsSync(jsonPath)) {
+          const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+          resolve(data.success
+            ? { success: true, account: data.account, clientName: data.clientName }
+            : { success: false, error: data.error || 'Falha na renovação' });
+        } else {
+          resolve({ success: false, error: 'Arquivo de resultado não encontrado' });
+        }
+      } catch (e: any) { resolve({ success: false, error: e.message }); }
+    });
+
+    child.on('error', (e: Error) => {
+      activeScraperPid = null;
+      resolve({ success: false, error: e.message });
+    });
+  });
+}
+
 // ─── Search single client ─────────────────────────────────────────────────────
 async function runSearch(query: string, searchBy: string): Promise<{ success: boolean; data?: any; error?: string }> {
   return new Promise(resolve => {
@@ -328,7 +368,41 @@ app.post('/run', authenticate, async (req, res) => {
     return;
   }
 
-  res.status(400).json({ error: 'Ação inválida. Use action: sync | search' });
+  if (action === 'renew') {
+    if (!query) {
+      res.status(400).json({ error: 'Campo "query" é obrigatório para renew' });
+      return;
+    }
+    const job = createJob();
+    res.json({ jobId: job.id, message: 'Renovação iniciada em background!' });
+
+    ;(async () => {
+      const addLog = (m: string) => { job.logs.push(m); updateJob(job); };
+      const by = searchBy || 'buyer_name';
+      try {
+        addLog(`🔍 Buscando "${query}" por ${by}...`);
+        const result = await runRenew(query, by);
+        job.result = result;
+        if (result.success) {
+          addLog(`✅ Renovado: ${result.clientName} | ${result.account}`);
+          await sendTelegram(`✅ <b>Cliente Renovado!</b>\n\nNome: ${result.clientName}\nAccount: ${result.account}`);
+          job.status = 'done';
+        } else {
+          addLog(`❌ Falha na renovação: ${result.error}`);
+          await sendTelegram(`❌ <b>Falha ao renovar "${query}"</b>\n\n${result.error}`);
+          job.status = 'error';
+        }
+      } catch (err: any) {
+        job.status = 'error';
+        job.result = { success: false, error: err.message };
+      }
+      job.finishedAt = new Date().toISOString();
+      updateJob(job);
+    })();
+    return;
+  }
+
+  res.status(400).json({ error: 'Ação inválida. Use action: sync | search | renew' });
 });
 
 // ─── GET /job/:id — polling do status ─────────────────────────────────────────
