@@ -32,15 +32,21 @@ export async function scrapeClients(page: Page, itemsPerPage: number = 100): Pro
   const accountListUrl = `${panelUrl}#/account/list`;
   console.log(`  🌐 Navegando para: ${accountListUrl}`);
   await page.goto(accountListUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-  await delay(3000);
 
-  await setItemsPerPage(page, itemsPerPage);
-
-  // Aguarda a tabela aparecer com dados
+  // Aguarda a tabela E a paginação carregarem antes de tentar interagir
   await page.waitForSelector('.ant-table-row', { timeout: 20000 }).catch(() => {
     console.log('  ⚠️  Linhas da tabela não apareceram em 20s.');
   });
-  await delay(2000);
+  await delay(1500);
+
+  await setItemsPerPage(page, itemsPerPage);
+
+  // Aguarda a tabela recarregar com o novo tamanho de página
+  await delay(3000);
+  await page.waitForSelector('.ant-table-row', { timeout: 20000 }).catch(() => {
+    console.log('  ⚠️  Tabela não recarregou após mudar itens por página.');
+  });
+  await delay(1000);
 
   // Extração direta e automática (sem interação humana)
   // Mecanismo confirmado: senha está em <span style="display: none;"> sem font-size no DOM
