@@ -298,15 +298,23 @@ export async function loginToPanel(config: {
     }
   }
 
-  let args = isLinux ? chromium.args : [
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-dev-shm-usage',
-    '--disable-gpu',
-    '--disable-extensions',
-    '--no-first-run',
+  const extraArgs = [
+    '--disable-blink-features=AutomationControlled',
+    '--disable-features=IsolateOrigins,site-per-process',
     '--window-size=1280,900',
   ];
+
+  let args = isLinux
+    ? [...chromium.args, ...extraArgs]
+    : [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-extensions',
+        '--no-first-run',
+        ...extraArgs,
+      ];
 
   // Adiciona Proxy se configurado (ótimo para contornar bloqueios de IP como Cloudflare)
   if (config.proxy) {
@@ -335,7 +343,7 @@ export async function loginToPanel(config: {
 
   // User agent realista e atualizado
   await page.setUserAgent(
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
   );
 
   // Evita carregamento de recursos inúteis para focar na velocidade do humanizado
@@ -359,19 +367,22 @@ export async function loginToPanel(config: {
   // Navega para a página de login
   console.log(`  🌐 Acessando ${config.url}/#/login`);
   try {
-    await page.goto(`${config.url}/#/login`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.goto(`${config.url}/#/login`, { waitUntil: 'networkidle2', timeout: 90000 });
   } catch (err: any) {
     console.log(`  ⚠️ Aviso no page.goto: ${err.message}. Tentando prosseguir mesmo assim...`);
   }
 
+  // Espera extra para SPA renderizar (Vue/React podem demorar)
+  await delay(3000);
+
   // Espera o formulário de login aparecer
   try {
-    await page.waitForSelector('.el-form, .login-form, form', { timeout: 20000 });
+    await page.waitForSelector('.el-form, .login-form, form, input[type="password"]', { timeout: 30000 });
     console.log('  ✅ Formulário de login detectado');
   } catch {
     console.log('  ⚠️ Formulário não encontrado diretamente, procurando inputs...');
   }
-  
+
   await delay(2000);
 
   // Verifica se já está logado (cookies funcionaram)
@@ -470,15 +481,26 @@ export async function loginToPanel(config: {
         console.log('    📸 Tirando screenshot da tela para ver o erro (Cloudflare block?)...');
         const errPath = path.join(__dirname, '..', 'output', `login_error_view.png`);
         await page.screenshot({ path: errPath, fullPage: true });
-        
+
         try {
           const { sendCaptchaToTelegram } = await import('./telegram');
           await sendCaptchaToTelegram(
-             errPath, 
+             errPath,
              `🚨 <b>Alerta do Scraper!</b>\nNão consegui encontrar os formulários de login do painel.\nIsso geralmente significa que a página demorou muito para carregar ou o Cloudflare barrou (IP do Render).\n\nAqui está exatamente o que o bot está "vendo" agora:`
           );
         } catch(e) {}
-        
+
+        // Tenta recarregar a página antes de desistir
+        if (loginAttempts < maxLoginAttempts) {
+          console.log(`    🔄 Recarregando página e aguardando mais ${loginAttempts * 5}s...`);
+          await delay(loginAttempts * 5000);
+          try {
+            await page.reload({ waitUntil: 'networkidle2', timeout: 60000 });
+          } catch {}
+          await delay(3000);
+          continue;
+        }
+
         break;
     }
   }
