@@ -106,7 +106,12 @@ async function setItemsPerPage(page: Page, items: number): Promise<void> {
   console.log(`  🔍 Configurando ${items} itens por página...`);
   try {
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await delay(1000);
+
+    // Aguarda a paginação renderizar antes de tentar interagir
+    await page.waitForSelector('.ant-select-selection-item', { timeout: 10000 }).catch(() => {
+      console.log('  ⚠️  Paginação demorou para renderizar, tentando mesmo assim...');
+    });
+    await delay(500);
 
     // Encontra o .ant-select-selector cujo .ant-select-selection-item contém número de página (ex: "10", "20")
     const sizeChanger = await page.evaluateHandle(() => {
