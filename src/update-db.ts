@@ -55,6 +55,41 @@ async function encryptPassword(password: string): Promise<string> {
   }
 }
 
+/**
+ * Atualiza um único cliente no banco pelo starhome_account.
+ * Usado após renew para evitar sync completo.
+ * 2 queries: 1 SELECT + 1 UPDATE. Sem bcrypt, sem matching por nome.
+ */
+export async function updateSingleClient(client: ClientData): Promise<void> {
+  const starhomeStatus = client.in_use === 'Used' && client.expired !== 'Expired' ? 'Ativo' : 'Inativo';
+  const now = new Date();
+  const expirationDate = client.expiration_date ? new Date(client.expiration_date) : null;
+
+  const [row] = await getDb()`
+    SELECT id FROM clients WHERE starhome_account = ${client.account} LIMIT 1
+  `;
+
+  if (!row) {
+    console.log(`   ⚠️  ${client.account} não encontrado no banco — pulando atualização pós-renew`);
+    return;
+  }
+
+  await getDb()`
+    UPDATE clients SET
+      app_password             = ${client.password},
+      days_remaining           = ${client.days_remaining},
+      plan                     = ${client.package_name},
+      status                   = ${starhomeStatus},
+      starhome_days_remaining  = ${client.days_remaining},
+      starhome_in_use          = ${client.in_use},
+      starhome_package         = ${client.package_name},
+      starhome_expiration_date = ${expirationDate},
+      starhome_last_sync       = ${now}
+    WHERE id = ${row.id}
+  `;
+  console.log(`   ✅ ${client.buyer_name || client.account} → atualizado pós-renew (${client.days_remaining} dias)`);
+}
+
 export async function updateDatabase(clients: ClientData[]) {
   console.log(`\n💾 Atualizando ${clients.length} clientes no banco de dados...`);
   console.log('⚠️ Usando criptografia bcrypt para senhas\n');

@@ -3,7 +3,7 @@ import 'dotenv/config'; // Adicionado para desenvolvimento local, será ignorado
 import { loginToPanel } from './login';
 import { scrapeClients, searchAndExtractClient } from './scrape';
 import { exportAll } from './export';
-import { updateDatabase } from './update-db';
+import { updateDatabase, updateSingleClient } from './update-db';
 import { renewClient } from './renew';
 
 function parseArgs() {
@@ -132,7 +132,30 @@ export async function runScraper() {
 
       if (success) {
         console.log(`\n✅ Renovação concluída: ${clientName} (${targetAccount})`);
-        fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: targetAccount, clientName }, null, 2));
+
+        // Busca dados frescos do cliente e atualiza só ele no banco
+        if (process.env.DATABASE_URL) {
+          try {
+            console.log(`\n💾 Atualizando ${targetAccount} no banco...`);
+            const freshClient = await searchAndExtractClient(session.page, targetAccount, 'account');
+            if (freshClient) {
+              await updateSingleClient(freshClient);
+              fs.writeFileSync(outputPath, JSON.stringify({
+                success: true,
+                account: targetAccount,
+                clientName: freshClient.buyer_name || clientName,
+                days_remaining: freshClient.days_remaining,
+              }, null, 2));
+            } else {
+              fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: targetAccount, clientName }, null, 2));
+            }
+          } catch (dbErr: any) {
+            console.error(`   ⚠️  Erro ao atualizar banco pós-renew: ${dbErr.message}`);
+            fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: targetAccount, clientName }, null, 2));
+          }
+        } else {
+          fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: targetAccount, clientName }, null, 2));
+        }
       } else {
         console.log(`\n❌ Falha na renovação de: ${clientName} (${targetAccount})`);
         fs.writeFileSync(outputPath, JSON.stringify({ success: false, account: targetAccount, clientName, error: 'Processo de renovação falhou no painel' }, null, 2));
