@@ -102,30 +102,40 @@ export async function runScraper() {
     let clients: any[] = [];
 
     if (args.renew) {
-      const searchBy = args.searchBy === 'account' ? 'buyer_name' : args.searchBy;
-      const client = await searchAndExtractClient(session.page, args.renew, searchBy);
-      if (!client) {
-        console.log(`\n❌ Cliente não encontrado: "${args.renew}"`);
-        const fs = await import('fs');
-        const outputPath = path.join(__dirname, '..', 'output', 'renew_result.json');
-        fs.writeFileSync(outputPath, JSON.stringify({ success: false, error: `Cliente não encontrado: "${args.renew}"` }, null, 2));
-        return [];
-      }
-
-      console.log(`\n✅ Cliente encontrado: ${client.buyer_name} (${client.account})`);
-      console.log(`   Dias restantes: ${client.days_remaining} | Status: ${client.in_use}`);
-      console.log(`\n🔄 Iniciando renovação...`);
-
-      const success = await renewClient(session.page, client.account);
       const fs = await import('fs');
       const outputPath = path.join(__dirname, '..', 'output', 'renew_result.json');
 
-      if (success) {
-        console.log(`\n✅ Renovação concluída: ${client.buyer_name} (${client.account})`);
-        fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: client.account, clientName: client.buyer_name }, null, 2));
+      let targetAccount = '';
+      let clientName = '';
+
+      if (args.searchBy === 'account') {
+        // Account direto — pula a busca, sem ambiguidade
+        targetAccount = args.renew;
+        clientName = args.renew;
+        console.log(`\n🔄 Renovando account direto: ${targetAccount}`);
       } else {
-        console.log(`\n❌ Falha na renovação de: ${client.buyer_name} (${client.account})`);
-        fs.writeFileSync(outputPath, JSON.stringify({ success: false, account: client.account, clientName: client.buyer_name, error: 'Processo de renovação falhou no painel' }, null, 2));
+        // Busca por nome para achar o account
+        const client = await searchAndExtractClient(session.page, args.renew, args.searchBy);
+        if (!client) {
+          console.log(`\n❌ Cliente não encontrado: "${args.renew}"`);
+          fs.writeFileSync(outputPath, JSON.stringify({ success: false, error: `Cliente não encontrado: "${args.renew}"` }, null, 2));
+          return [];
+        }
+        targetAccount = client.account;
+        clientName = client.buyer_name;
+        console.log(`\n✅ Cliente encontrado: ${clientName} (${targetAccount})`);
+        console.log(`   Dias restantes: ${client.days_remaining} | Status: ${client.in_use}`);
+        console.log(`\n🔄 Iniciando renovação...`);
+      }
+
+      const success = await renewClient(session.page, targetAccount);
+
+      if (success) {
+        console.log(`\n✅ Renovação concluída: ${clientName} (${targetAccount})`);
+        fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: targetAccount, clientName }, null, 2));
+      } else {
+        console.log(`\n❌ Falha na renovação de: ${clientName} (${targetAccount})`);
+        fs.writeFileSync(outputPath, JSON.stringify({ success: false, account: targetAccount, clientName, error: 'Processo de renovação falhou no painel' }, null, 2));
       }
       return [];
     }
