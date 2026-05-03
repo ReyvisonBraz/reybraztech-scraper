@@ -108,15 +108,15 @@ export async function renewClient(page: Page, account: string): Promise<boolean>
       if (attempt < MAX_RENEW_RETRIES) {
         console.log(`  🔄 Recarregando página para tentar novamente...`);
         const panelUrl = page.url().split('#')[0];
-        await page.goto(`${panelUrl}#/account/list`, { waitUntil: 'networkidle2', timeout: 60000 });
-        await delay(3000);
+        await page.goto(`${panelUrl}#/account/list`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await delay(5000);
       }
     } catch (err: any) {
       console.log(`  ❌ Erro na tentativa ${attempt}: ${err.message}`);
       if (attempt < MAX_RENEW_RETRIES) {
         const panelUrl = page.url().split('#')[0];
-        await page.goto(`${panelUrl}#/account/list`, { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
-        await delay(3000);
+        await page.goto(`${panelUrl}#/account/list`, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+        await delay(5000);
       }
     }
   }
@@ -137,14 +137,14 @@ async function attemptRenewal(
   const panelUrl = page.url().split('#')[0];
   if (attempt === 1 || !page.url().includes('/account/list')) {
     step('🌐 Navegando para lista de contas...');
-    await page.goto(`${panelUrl}#/account/list`, { waitUntil: 'networkidle2', timeout: 60000 });
-    await delay(3000);
+    await page.goto(`${panelUrl}#/account/list`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await delay(5000);
   }
 
-  await page.waitForSelector('.ant-table-row', { timeout: 20000 }).catch(() => {
-    step('⚠️  Tabela não carregou em 20s');
+  await page.waitForSelector('.ant-table-row, .el-table__row, tr.ant-table-row', { timeout: 30000 }).catch(() => {
+    step('⚠️  Tabela não carregou em 30s');
   });
-  await delay(1000);
+  await delay(1500);
 
   // 2. Encontra a linha do cliente
   step('🔍 Procurando conta na tabela...');
@@ -232,64 +232,39 @@ async function attemptRenewal(
   // PASSO 5a: Preencher o campo de pontos no formulário de renovação
   step('📝 Preenchendo campo de pontos na seção de renovação...');
 
-  const upResult = await page.evaluate(() => {
-    const modal = document.querySelector('.ant-modal-content');
-    if (!modal) return 'modal-not-found';
+  // Busca o input de pontos (spinbutton) dentro do formulário de renovação
+  const pointsInputSelector = '.ant-modal-content form[confirmtext*="renew"] input[role="spinbutton"]:not([disabled])';
+  let inputHandle = await page.$(pointsInputSelector).catch(() => null);
 
-    const forms = modal.querySelectorAll('form');
-    let renewForm: Element | null = null;
-    for (const form of Array.from(forms)) {
-      if (form.getAttribute('confirmtext')?.includes('renew')) {
-        renewForm = form;
-        break;
+  // Fallback: busca dentro de qualquer form no modal
+  if (!inputHandle) {
+    const forms = await page.$$('.ant-modal-content form');
+    for (const form of forms) {
+      const confirmtext = await form.evaluate(el => el.getAttribute('confirmtext') || '');
+      if (confirmtext.includes('renew')) {
+        inputHandle = await form.$('input[role="spinbutton"]:not([disabled])');
+        if (inputHandle) break;
       }
     }
-
-    if (!renewForm) return 'renew-form-not-found';
-
-    const upBtn = renewForm.querySelector('.ant-input-number-handler-up') as HTMLElement;
-    if (upBtn) {
-      upBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-      upBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-      return 'up-clicked-in-renew-form';
-    }
-
-    const spinbutton = renewForm.querySelector('input[role="spinbutton"]:not([disabled])') as HTMLElement;
-    if (spinbutton) {
-      spinbutton.focus();
-      spinbutton.click();
-      return 'focused-spinbutton-in-renew-form';
-    }
-
-    return 'no-spinbutton-in-renew-form';
-  });
-  step(`  📊 InputNumber: ${upResult}`);
-
-  if (upResult === 'renew-form-not-found') {
-    step('❌ Formulário de renovação não encontrado no modal.');
-    await page.screenshot({ path: path.join(outputDir, `renew_noform_${account}_t${attempt}.png`) });
-    return { success: false, error: 'Formulário de renovação não encontrado' };
   }
 
-  if (upResult === 'focused-spinbutton-in-renew-form') {
-    await page.keyboard.press('ArrowUp');
+  if (!inputHandle) {
+    step('❌ Campo de pontos (spinbutton) não encontrado no formulário de renovação.');
+    await page.screenshot({ path: path.join(outputDir, `renew_nopoints_${account}_t${attempt}.png`) });
+    return { success: false, error: 'Campo de pontos não encontrado no formulário de renovação' };
   }
-  await delay(500);
+
+  // Estratégia: foca o input e pressiona ArrowUp (via teclado, compatível com React)
+  await inputHandle.click();
+  await delay(300);
+  // Pressiona Backspace para limpar e depois digita 1
+  await page.keyboard.press('Backspace');
+  await page.keyboard.type('1', { delay: 50 });
+  step('  📊 Campo de pontos preenchido com 1');
 
   // Verifica o valor
-  const currentValue = await page.evaluate(() => {
-    const modal = document.querySelector('.ant-modal-content');
-    if (!modal) return 'no-modal';
-    const forms = modal.querySelectorAll('form');
-    for (const form of Array.from(forms)) {
-      if (form.getAttribute('confirmtext')?.includes('renew')) {
-        const input = form.querySelector('input[role="spinbutton"]:not([disabled])') as HTMLInputElement;
-        return input ? `value="${input.value}"` : 'no-input';
-      }
-    }
-    return 'no-renew-form';
-  });
-  step(`  📊 Valor do campo total points: ${currentValue}`);
+  const currentValue = await inputHandle.evaluate((el: HTMLInputElement) => el.value);
+  step(`  📊 Valor do campo total points: "${currentValue}"`);
 
   await page.screenshot({ path: path.join(outputDir, `renew_filled_${account}_t${attempt}.png`) });
 

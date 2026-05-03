@@ -31,11 +31,15 @@ export async function scrapeClients(page: Page, itemsPerPage: number = 100): Pro
   const panelUrl = page.url().split('#')[0];
   const accountListUrl = `${panelUrl}#/account/list`;
   console.log(`  🌐 Navegando para: ${accountListUrl}`);
-  await page.goto(accountListUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+  await page.goto(accountListUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-  // Aguarda a tabela E a paginação carregarem antes de tentar interagir
-  await page.waitForSelector('.ant-table-row', { timeout: 20000 }).catch(() => {
-    console.log('  ⚠️  Linhas da tabela não apareceram em 20s.');
+  // Aguarda a tabela carregar (após SPA + API)
+  console.log('  ⏳ Aguardando tabela de contas carregar...');
+  await delay(3000);
+  await page.waitForSelector('.ant-table-row, .el-table__row, tr.ant-table-row', { timeout: 30000 }).catch(() => {
+    console.log('  ⚠️  Linhas da tabela não apareceram em 30s.');
+    console.log('  📸 Tirando screenshot da tela para debug...');
+    page.screenshot({ path: path.join(__dirname, '..', 'output', 'scrape_table_timeout.png') }).catch(() => {});
   });
   await delay(1500);
 
@@ -304,11 +308,12 @@ export async function searchAndExtractClient(
   const accountListUrl = `${panelUrl}#/account/list`;
   
   console.log(`  🌐 Navegando para: ${accountListUrl}`);
-  await page.goto(accountListUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+  await page.goto(accountListUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await delay(3000);
 
   try {
-    await page.waitForSelector('.ant-table-row', { timeout: 20000 }).catch(() => {
-      console.log('  ⚠️  Tabela não apareceu');
+    await page.waitForSelector('.ant-table-row, .el-table__row, tr.ant-table-row', { timeout: 30000 }).catch(() => {
+      console.log('  ⚠️  Tabela não apareceu em 30s');
     });
   } catch (err) {
     console.log(`  ⚠️  Erro ao carregar página: ${err}`);
@@ -594,41 +599,53 @@ async function promptFallback(page: Page, query: string): Promise<boolean> {
 async function goToNextPage(page: Page): Promise<boolean> {
   try {
     const nextButtonSelectors = [
-      '.el-pagination .btn-next:not(.disabled):not([disabled])',
-      '.el-pagination button.btn-next:not(.is-disabled)',
       'li.ant-pagination-next:not(.ant-pagination-disabled) button',
       'li.ant-pagination-next:not(.ant-pagination-disabled)',
       '.ant-pagination .ant-pagination-next:not(.ant-pagination-disabled)',
-      'button.ant-pagination-next',
+      'button.ant-pagination-item-link[title="Next Page"]',
+      '.ant-pagination-next button:not([disabled])',
+      '.el-pagination .btn-next:not(.disabled):not([disabled])',
+      '.el-pagination button.btn-next:not(.is-disabled)',
     ];
 
     let nextButton = null;
     for (const selector of nextButtonSelectors) {
       const btn = await page.$(selector);
       if (btn) {
-        const isVisible = await btn.evaluate((el: Element) => {
-          const style = window.getComputedStyle(el);
-          return style.display !== 'none' && style.visibility !== 'hidden';
-        });
-        if (isVisible) {
-          nextButton = btn;
-          break;
+        try {
+          const isVisible = await btn.evaluate((el: Element) => {
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+          });
+          if (isVisible) {
+            nextButton = btn;
+            break;
+          }
+        } catch {
+          continue;
         }
       }
     }
 
     if (nextButton) {
       const isDisabled = await nextButton.evaluate((el: Element) => {
-        return el.classList.contains('disabled') ||
-               el.classList.contains('is-disabled') ||
-               el.classList.contains('ant-pagination-disabled') ||
-               el.hasAttribute('disabled') || 
-               el.parentElement?.classList.contains('ant-pagination-disabled');
+        const parent = el.closest('li');
+        const classes = (parent || el).className || '';
+        return classes.includes('disabled') ||
+               classes.includes('ant-pagination-disabled') ||
+               el.hasAttribute('disabled') ||
+               el.getAttribute('aria-disabled') === 'true';
       });
 
       if (!isDisabled) {
         await nextButton.click();
         console.log('  ➡️  Indo para próxima página...');
+        // Aguarda tabela recarregar após clique
+        await delay(2000);
+        await page.waitForSelector('.ant-table-row, .el-table__row, tr.ant-table-row', { timeout: 15000 }).catch(() => {
+          console.log('  ⚠️  Tabela não recarregou após ir para próxima página');
+        });
         return true;
       }
     }

@@ -346,14 +346,17 @@ export async function loginToPanel(config: {
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
   );
 
-  // Evita carregamento de recursos inúteis para focar na velocidade do humanizado
+  // Otimização: bloqueia recursos desnecessários para acelerar carregamento
+  // NOTA: NÃO bloqueamos durante Cloudflare challenge (estilos/imgs podem ser necessários)
   await page.setRequestInterception(true);
   page.on('request', (req: any) => {
-      if (['image', 'stylesheet', 'font'].includes(req.resourceType()) && !req.url().includes('captcha')) {
-          req.continue(); // Por enquanto deixamos continuar tudo, mas podemos bloquear lixo se der timeout
-      } else {
-          req.continue();
-      }
+    const type = req.resourceType();
+    // Só bloqueia fontes — imagens e CSS podem ser necessários para Cloudflare e renderização SPA
+    if (type === 'font') {
+      req.abort();
+    } else {
+      req.continue();
+    }
   });
 
   // Esconde sinais de automação adicionais (O stealth plugin já faz muito disso, mas redundância ajuda)
@@ -365,15 +368,46 @@ export async function loginToPanel(config: {
   await loadCookies(page);
 
   // Navega para a página de login
+  // NOTA: Usamos 'domcontentloaded' em vez de 'networkidle2' porque o Cloudflare
+  // mantém conexões WebSocket/keep-alive abertas que impedem o idle da rede.
   console.log(`  🌐 Acessando ${config.url}/#/login`);
   try {
-    await page.goto(`${config.url}/#/login`, { waitUntil: 'networkidle2', timeout: 90000 });
+    await page.goto(`${config.url}/#/login`, { waitUntil: 'domcontentloaded', timeout: 120000 });
   } catch (err: any) {
     console.log(`  ⚠️ Aviso no page.goto: ${err.message}. Tentando prosseguir mesmo assim...`);
   }
 
-  // Espera extra para SPA renderizar (Vue/React podem demorar)
-  await delay(3000);
+  // Aguarda o Cloudflare Challenge ser resolvido (se existir)
+  await page.waitForFunction(
+    () => {
+      if (!document.body) return true; // body ainda não existe = página ainda carregando, espera
+      const bodyText = document.body.innerText || '';
+      const isCloudflare = bodyText.includes('Checking your browser') ||
+                           bodyText.includes('Just a moment') ||
+                           bodyText.includes('DDoS') ||
+                           bodyText.includes('protection');
+      return !isCloudflare;
+    },
+    { timeout: 60000, polling: 1000 }
+  ).catch(() => {
+    console.log('  ⚠️ Cloudflare challenge pode ainda estar ativo, tentando prosseguir...');
+  });
+
+  // Espera extra para SPA renderizar (Vue/React podem demorar, especialmente após Cloudflare)
+  console.log('  ⏳ Aguardando SPA renderizar...');
+  await delay(5000);
+  try {
+    await page.waitForFunction(
+      () => {
+        const inputs = document.querySelectorAll('input[type="text"], input[type="password"]');
+        return inputs.length >= 2;
+      },
+      { timeout: 30000 }
+    );
+    console.log('  ✅ Inputs do formulário de login detectados');
+  } catch {
+    console.log('  ⚠️ Inputs de login não encontrados via waitForFunction, tentando seletor CSS...');
+  }
 
   // Espera o formulário de login aparecer
   try {
@@ -384,12 +418,13 @@ export async function loginToPanel(config: {
   }
 
   // Verifica se a SPA redirecionou para fora do login (cookies válidos)
-  // Usa waitForFunction para aguardar o hash routing completar (até 10s)
+  // Usa waitForFunction para aguardar o hash routing completar (até 15s)
+  // Aumentado para 15s pois após Cloudflare o SPA pode demorar mais
   let alreadyLoggedIn = false;
   try {
     await page.waitForFunction(
       () => !window.location.href.includes('login'),
-      { timeout: 10000, polling: 500 }
+      { timeout: 15000, polling: 500 }
     );
     alreadyLoggedIn = true;
   } catch {
@@ -506,7 +541,8 @@ export async function loginToPanel(config: {
           console.log(`    🔄 Recarregando página e aguardando mais ${loginAttempts * 5}s...`);
           await delay(loginAttempts * 5000);
           try {
-            await page.reload({ waitUntil: 'networkidle2', timeout: 60000 });
+            await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+            await delay(5000); // Aguarda SPA renderizar após reload
           } catch {}
           await delay(3000);
           continue;
