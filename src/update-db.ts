@@ -173,11 +173,15 @@ export async function updateDatabase(clients: ClientData[]) {
       const expirationDate = client.expiration_date ? new Date(client.expiration_date) : null;
 
       if (existingId) {
+        // Atualiza dados do StarHome.
+        // app_account/app_password só são preenchidos se estiverem vazios
+        // (eles vêm do login_pool no pagamento, não do StarHome)
         await getDb()`
           UPDATE clients SET
             starhome_account         = ${client.account},
-            app_account              = ${client.account},
-            app_password             = ${client.password},
+            starhome_password        = ${client.password},
+            app_account              = CASE WHEN app_account IS NULL OR app_account = '' THEN ${client.account} ELSE app_account END,
+            app_password             = CASE WHEN app_password IS NULL OR app_password = '' THEN ${client.password} ELSE app_password END,
             days_remaining           = ${client.days_remaining},
             plan                     = ${client.package_name},
             status                   = ${starhomeStatus},
