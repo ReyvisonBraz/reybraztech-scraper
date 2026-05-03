@@ -59,8 +59,38 @@ export async function runScraper() {
   };
 
   if (!config.account || !config.password) {
-    throw new Error('PANEL_ACCOUNT e PANEL_PASSWORD são obrigatórios no .env');
+    console.error('\n❌ PANEL_ACCOUNT e PANEL_PASSWORD são obrigatórios no .env');
+    console.error('   Crie um arquivo .env com as variáveis necessárias.\n');
+    process.exit(1);
   }
+
+  console.log(`\n📋 Configuração:`);
+  console.log(`   URL: ${config.url}`);
+  console.log(`   Account: ${config.account}`);
+  console.log(`   Headless: ${config.headless}`);
+  console.log(`   Itens/página: ${config.itemsPerPage}`);
+
+  if (args.search) {
+    console.log(`\n🔍 Modo BUSCA RÁPIDA:`);
+    console.log(`   Query: "${args.search}"`);
+    console.log(`   Tipo: ${args.searchBy}`);
+  } else if (args.renew) {
+    console.log(`\n🔄 Modo RENOVAÇÃO:`);
+    console.log(`   Query: "${args.renew}"`);
+    console.log(`   Tipo: ${args.searchBy}`);
+  } else if (args.sync) {
+    console.log(`\n🔄 Modo SINCRONIZAÇÃO COMPLETA:`);
+  } else {
+    console.log(`\n⚠️  Nenhum modo especificado. Use --search, --renew ou --sync`);
+    console.log(`   Exemplo: npm run scraper -- --search=conta123`);
+    console.log(`   Exemplo: npm run scraper -- --renew="João Silva" --by=name`);
+    console.log(`   Exemplo: npm run scraper -- --sync`);
+    return [];
+  }
+
+  let browser;
+
+  try {
 
   console.log(`\n📋 Configuração:`);
   console.log(`   URL: ${config.url}`);
