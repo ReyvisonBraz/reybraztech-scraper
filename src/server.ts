@@ -176,7 +176,7 @@ async function runScraper(): Promise<{ success: boolean; clients: number; stats?
         return;
       }
       try {
-        const jsonPath = path.join(__dirname, '..', 'output', 'clients.json');
+        const jsonPath = path.join(__dirname, '..', 'output', 'clients_extracted.json');
         if (fs.existsSync(jsonPath)) {
           const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
           const list = data.clients || [];

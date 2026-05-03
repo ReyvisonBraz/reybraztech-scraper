@@ -64,7 +64,18 @@ export async function scrapeClients(page: Page, itemsPerPage: number = 100): Pro
   while (hasNextPage) {
     console.log(`\n  📄 Extraindo página ${currentPage}...`);
 
-    const pageClients = await extractTableData(page);
+    // Tenta extrair a página com retry (máx 2 tentativas)
+    let pageClients = await extractTableData(page);
+    if (pageClients.length === 0) {
+      console.log(`    ⚠️  Nenhum cliente extraído — tentando novamente em 2s...`);
+      await delay(2000);
+      pageClients = await extractTableData(page);
+    }
+    if (pageClients.length === 0) {
+      console.log(`    ⚠️  Segunda tentativa vazia — última tentativa em 3s...`);
+      await delay(3000);
+      pageClients = await extractTableData(page);
+    }
     console.log(`    ✅ ${pageClients.length} clientes extraídos na página ${currentPage}`);
 
     allClients.push(...pageClients);
@@ -78,7 +89,7 @@ export async function scrapeClients(page: Page, itemsPerPage: number = 100): Pro
     hasNextPage = await goToNextPage(page);
     if (hasNextPage) {
       currentPage++;
-      await delay(2500);
+      await delay(1000);
       await page.waitForSelector('.ant-table-row', { timeout: 10000 }).catch(() => {});
     }
   }
@@ -268,63 +279,6 @@ async function extractTableData(page: Page): Promise<ClientData[]> {
 }
 
 /**
- * Clica nas senhas mascaradas para revelar a senha real de cada cliente.
- * Versão melhorada com try/catch robusto.
- */
-async function revealPasswords(page: Page, clients: ClientData[]): Promise<ClientData[]> {
-  console.log('  🔓 Revelando senhas...');
-
-  try {
-    const passwordCellSelectors = [
-      '.el-table__body-wrapper table tbody tr td:nth-child(4)',
-      '.ant-table-tbody tr td:nth-child(4)',
-      'table tbody tr td:nth-child(4)',
-    ];
-
-    let passwordCells: any[] = [];
-    for (const selector of passwordCellSelectors) {
-      const cells = await page.$$(selector);
-      if (cells.length > 0) {
-        passwordCells = cells;
-        break;
-      }
-    }
-
-    if (passwordCells.length === 0) {
-      console.log('  ⚠️  Células de senha não encontradas');
-      return clients;
-    }
-
-    for (let i = 0; i < passwordCells.length && i < clients.length; i++) {
-      try {
-        const cellText = await passwordCells[i].evaluate((el: Element) => el.textContent || '');
-
-        if (cellText.includes('***') || cellText.includes('•') || cellText.includes('···')) {
-          await passwordCells[i].click();
-          await delay(600);
-
-          const revealed = await passwordCells[i].evaluate((el: Element) => el.textContent || '');
-          if (revealed && !revealed.includes('***') && !revealed.includes('•') && !revealed.includes('···')) {
-            clients[i].password = revealed.trim();
-          }
-        } else if (cellText && cellText !== '') {
-          clients[i].password = cellText.trim();
-        }
-      } catch (err) {
-        console.log(`  ⚠️  Erro ao revelar senha ${i}: ${err}`);
-      }
-    }
-
-    const revealed = clients.filter((c) => c.password !== '***').length;
-    console.log(`  ✅ ${revealed}/${clients.length} senhas reveladas`);
-  } catch (error) {
-    console.log(`  ⚠️  Erro geral ao revelar senhas: ${error}`);
-  }
-
-  return clients;
-}
-
-/**
  * Busca um cliente usando a barra de pesquisa nativa do painel.
  * 
  * Fluxo:
@@ -404,9 +358,10 @@ export async function searchAndExtractClient(
     }
 
     if (!filterChanged) {
-      console.log(`  ⚠️ Filtro nativo não encontrado, fazendo fallback para busca manual em 100 itens...`);
-      console.log(`  🔍 Busca por nome/telefone - configurando 100 por página...`);
-      await setItemsPerPage(page, 100);
+      const envItemsPerPage = parseInt(process.env.ITEMS_PER_PAGE || '100');
+      console.log(`  ⚠️ Filtro nativo não encontrado, fazendo fallback para busca manual em ${envItemsPerPage} itens...`);
+      console.log(`  🔍 Busca por nome/telefone - configurando ${envItemsPerPage} por página...`);
+      await setItemsPerPage(page, envItemsPerPage);
       await delay(2000);
       console.log(`  🔍 Busca por nome/telefone - fazendo busca manual na tabela...`);
       return searchManuallyInTable(page, query, searchBy);

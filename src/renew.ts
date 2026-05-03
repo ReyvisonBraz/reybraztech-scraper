@@ -73,15 +73,21 @@ async function selectAntDropdown(page: Page, containerSelector: string, dropdown
   await delay(500);
 }
 
+const MAX_RENEW_RETRIES = 2;
+
 /**
  * Renova o serviço de um cliente no painel StarHome.
+ * Tenta até 2 vezes se falhar.
  *
  * Fluxo:
  * 1. Navega para a lista de contas
  * 2. Encontra a linha do cliente pelo account
  * 3. Clica nas "3 bolinhas" (menu de ações)
- * 4. Clica em "Renew Service"
- * 5. Clica em "Confirm" no modal
+ * 4. Clica em "Edit" (NÃO "Renew service" — esse cria contas novas!)
+ * 5. No modal Edit, encontra o formulário de renovação
+ * 6. Incrementa os pontos no InputNumber
+ * 7. Clica Confirm no formulário de renovação
+ * 8. Clica OK no popup de confirmação
  */
 export async function renewClient(page: Page, account: string): Promise<boolean> {
   console.log(`\n🔄 Iniciando renovação do cliente: ${account}`);
@@ -89,18 +95,59 @@ export async function renewClient(page: Page, account: string): Promise<boolean>
   const outputDir = path.join(__dirname, '..', 'output');
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
+  for (let attempt = 1; attempt <= MAX_RENEW_RETRIES; attempt++) {
+    console.log(`  📍 Tentativa ${attempt}/${MAX_RENEW_RETRIES}...`);
+
+    try {
+      const result = await attemptRenewal(page, account, outputDir, attempt);
+      if (result.success) {
+        console.log(`  🎉 Renovação de "${account}" concluída com sucesso!`);
+        return true;
+      }
+      console.log(`  ⚠️  Falhou na tentativa ${attempt}: ${result.error}`);
+      if (attempt < MAX_RENEW_RETRIES) {
+        console.log(`  🔄 Recarregando página para tentar novamente...`);
+        const panelUrl = page.url().split('#')[0];
+        await page.goto(`${panelUrl}#/account/list`, { waitUntil: 'networkidle2', timeout: 60000 });
+        await delay(3000);
+      }
+    } catch (err: any) {
+      console.log(`  ❌ Erro na tentativa ${attempt}: ${err.message}`);
+      if (attempt < MAX_RENEW_RETRIES) {
+        const panelUrl = page.url().split('#')[0];
+        await page.goto(`${panelUrl}#/account/list`, { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
+        await delay(3000);
+      }
+    }
+  }
+
+  console.log(`  ❌ Todas as ${MAX_RENEW_RETRIES} tentativas falharam.`);
+  return false;
+}
+
+async function attemptRenewal(
+  page: Page,
+  account: string,
+  outputDir: string,
+  attempt: number
+): Promise<{ success: boolean; error?: string }> {
+  const step = (msg: string) => console.log(`  ${msg}`);
+
   // 1. Navega para a lista de contas
   const panelUrl = page.url().split('#')[0];
-  await page.goto(`${panelUrl}#/account/list`, { waitUntil: 'networkidle2', timeout: 30000 });
-  await delay(3000);
+  if (attempt === 1 || !page.url().includes('/account/list')) {
+    step('🌐 Navegando para lista de contas...');
+    await page.goto(`${panelUrl}#/account/list`, { waitUntil: 'networkidle2', timeout: 60000 });
+    await delay(3000);
+  }
 
   await page.waitForSelector('.ant-table-row', { timeout: 20000 }).catch(() => {
-    console.log('  ⚠️  Tabela não carregou em 20s');
+    step('⚠️  Tabela não carregou em 20s');
   });
   await delay(1000);
 
   // 2. Encontra a linha do cliente
-  console.log(`  🔍 Procurando conta "${account}"...`);
+  step('🔍 Procurando conta na tabela...');
   const rowFound = await page.evaluate((target: string) => {
     const rows = document.querySelectorAll('tr.ant-table-row');
     for (const row of Array.from(rows)) {
@@ -116,28 +163,30 @@ export async function renewClient(page: Page, account: string): Promise<boolean>
   }, account);
 
   if (!rowFound) {
-    console.log(`  ❌ Conta "${account}" não encontrada.`);
-    return false;
+    step(`❌ Conta "${account}" não encontrada na tabela.`);
+    return { success: false, error: 'Conta não encontrada na tabela' };
   }
-  console.log(`  ✅ Conta encontrada!`);
+  step('✅ Conta encontrada!');
 
   // 3. Clica nas 3 bolinhas
+  step('🖱️  Abrindo menu de ações...');
   const moreBtn = await page.$('tr[data-target-account="true"] .icon-more') ||
                   await page.$('tr[data-target-account="true"] .anticon-more') ||
                   await page.$('tr[data-target-account="true"] [aria-label="more"]');
 
   if (!moreBtn) {
-    console.log(`  ❌ Botão "..." não encontrado.`);
-    return false;
+    step('❌ Botão "..." não encontrado na linha do cliente.');
+    await page.screenshot({ path: path.join(outputDir, `renew_nobtn_${account}_t${attempt}.png`) });
+    return { success: false, error: 'Botão de menu não encontrado' };
   }
 
   await moreBtn.click();
-  console.log(`  🖱️  Menu aberto`);
+  step('✅ Menu aberto');
   await delay(1500);
 
   // 4. Clica em "Edit" (NÃO "Renew service" — esse cria contas novas!)
+  step('🔍 Clicando "Edit"...');
   const editClicked = await page.evaluate(() => {
-    // Procura no menu dropdown o item "Edit"
     const spans = document.querySelectorAll('span.ml-1');
     for (const span of Array.from(spans)) {
       if ((span.textContent || '').trim().toLowerCase() === 'edit') {
@@ -156,18 +205,19 @@ export async function renewClient(page: Page, account: string): Promise<boolean>
   });
 
   if (!editClicked) {
-    console.log(`  ❌ "Edit" não encontrado no menu.`);
-    await page.screenshot({ path: path.join(outputDir, `renew_menu_fail_${account}.png`) });
-    return false;
+    step('❌ "Edit" não encontrado no menu.');
+    await page.screenshot({ path: path.join(outputDir, `renew_noedit_${account}_t${attempt}.png`) });
+    return { success: false, error: 'Opção Edit não encontrada no menu' };
   }
 
-  console.log(`  ✅ "Edit" clicado`);
+  step('✅ "Edit" clicado');
   await delay(2000);
 
   // 5. Aguarda o modal Edit carregar
+  step('⏳ Aguardando modal Edit...');
   await page.waitForSelector('.ant-modal-content', { timeout: 10000 }).catch(() => {});
   await delay(2000);
-  await page.screenshot({ path: path.join(outputDir, `edit_modal_${account}.png`) });
+  await page.screenshot({ path: path.join(outputDir, `edit_modal_${account}_t${attempt}.png`) });
 
   // O modal Edit tem MÚLTIPLOS formulários:
   //   - Formulário de CRIAÇÃO de contas
@@ -180,14 +230,12 @@ export async function renewClient(page: Page, account: string): Promise<boolean>
   // 3. Clicar OK no popup "Please confirm whether to renew this account."
 
   // PASSO 5a: Preencher o campo de pontos no formulário de renovação
-  // O formulário de renovação tem "Account allocation of package duration" (não "Each account...")
-  console.log(`  📝 Preenchendo campo de pontos na seção de renovação...`);
+  step('📝 Preenchendo campo de pontos na seção de renovação...');
 
   const upResult = await page.evaluate(() => {
     const modal = document.querySelector('.ant-modal-content');
     if (!modal) return 'modal-not-found';
 
-    // Encontra o formulário de renovação pelo atributo confirmtext
     const forms = modal.querySelectorAll('form');
     let renewForm: Element | null = null;
     for (const form of Array.from(forms)) {
@@ -199,7 +247,6 @@ export async function renewClient(page: Page, account: string): Promise<boolean>
 
     if (!renewForm) return 'renew-form-not-found';
 
-    // Clica no botão "seta para cima" do InputNumber DENTRO do formulário de renovação
     const upBtn = renewForm.querySelector('.ant-input-number-handler-up') as HTMLElement;
     if (upBtn) {
       upBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
@@ -207,7 +254,6 @@ export async function renewClient(page: Page, account: string): Promise<boolean>
       return 'up-clicked-in-renew-form';
     }
 
-    // Fallback: foca no spinbutton do formulário de renovação
     const spinbutton = renewForm.querySelector('input[role="spinbutton"]:not([disabled])') as HTMLElement;
     if (spinbutton) {
       spinbutton.focus();
@@ -217,11 +263,16 @@ export async function renewClient(page: Page, account: string): Promise<boolean>
 
     return 'no-spinbutton-in-renew-form';
   });
-  console.log(`    InputNumber: ${upResult}`);
+  step(`  📊 InputNumber: ${upResult}`);
+
+  if (upResult === 'renew-form-not-found') {
+    step('❌ Formulário de renovação não encontrado no modal.');
+    await page.screenshot({ path: path.join(outputDir, `renew_noform_${account}_t${attempt}.png`) });
+    return { success: false, error: 'Formulário de renovação não encontrado' };
+  }
 
   if (upResult === 'focused-spinbutton-in-renew-form') {
     await page.keyboard.press('ArrowUp');
-    console.log(`    Pressionou ArrowUp`);
   }
   await delay(500);
 
@@ -238,12 +289,12 @@ export async function renewClient(page: Page, account: string): Promise<boolean>
     }
     return 'no-renew-form';
   });
-  console.log(`    Campo total points: ${currentValue}`);
+  step(`  📊 Valor do campo total points: ${currentValue}`);
 
-  await page.screenshot({ path: path.join(outputDir, `renew_filled_${account}.png`) });
+  await page.screenshot({ path: path.join(outputDir, `renew_filled_${account}_t${attempt}.png`) });
 
-  // PASSO 5b: Clica no Confirm do formulário de RENOVAÇÃO (não de criação!)
-  console.log(`  🔍 Clicando Confirm da seção de renovação...`);
+  // PASSO 5b: Clica no Confirm do formulário de RENOVAÇÃO
+  step('🔍 Clicando Confirm da seção de renovação...');
   const confirmResult = await page.evaluate(() => {
     const modal = document.querySelector('.ant-modal-content');
     if (!modal) return 'modal-not-found';
@@ -251,14 +302,11 @@ export async function renewClient(page: Page, account: string): Promise<boolean>
     const forms = modal.querySelectorAll('form');
     for (const form of Array.from(forms)) {
       if (form.getAttribute('confirmtext')?.includes('renew')) {
-        // O botão Confirm fica ANTES do form (como sibling) ou dentro dele
-        // Procura o botão Confirm mais próximo deste formulário
         const btn = form.querySelector('button.ant-btn-primary') as HTMLElement;
         if (btn) {
           btn.click();
           return 'confirm-clicked-inside-form';
         }
-        // Fallback: o botão pode ser sibling anterior do form
         const prev = form.previousElementSibling;
         if (prev && prev.tagName === 'BUTTON' && prev.classList.contains('ant-btn-primary')) {
           (prev as HTMLElement).click();
@@ -269,17 +317,21 @@ export async function renewClient(page: Page, account: string): Promise<boolean>
     }
     return 'renew-form-not-found';
   });
-  console.log(`  🔍 Confirm: ${confirmResult}`);
+  step(`  🔍 Resultado Confirm: ${confirmResult}`);
+
+  if (confirmResult === 'confirm-btn-not-found-in-renew-form') {
+    step('❌ Botão Confirm não encontrado no formulário de renovação.');
+    return { success: false, error: 'Botão Confirm não encontrado' };
+  }
 
   // PASSO 6: Aguarda o popup "Please confirm whether to renew this account." e clica OK
-  console.log(`  ⏳ Aguardando popup de confirmação de renovação...`);
+  step('⏳ Aguardando popup de confirmação...');
   await delay(2000);
-  await page.screenshot({ path: path.join(outputDir, `renew_confirm_popup_${account}.png`) });
+  await page.screenshot({ path: path.join(outputDir, `renew_popup_${account}_t${attempt}.png`) });
 
   const okResult = await page.evaluate(() => {
     const body = document.body.innerText || '';
     if (body.includes('confirm whether to renew') || body.includes('Please confirm')) {
-      // Clica no OK (ant-btn-primary ant-btn-sm)
       const buttons = document.querySelectorAll('button.ant-btn-primary.ant-btn-sm');
       for (const btn of Array.from(buttons)) {
         if ((btn.textContent || '').trim() === 'OK') {
@@ -287,7 +339,6 @@ export async function renewClient(page: Page, account: string): Promise<boolean>
           return 'ok-clicked';
         }
       }
-      // Fallback
       const allBtns = document.querySelectorAll('button');
       for (const btn of Array.from(allBtns)) {
         if ((btn.textContent || '').trim() === 'OK' && btn.classList.contains('ant-btn-primary')) {
@@ -299,11 +350,16 @@ export async function renewClient(page: Page, account: string): Promise<boolean>
     }
     return 'no-confirm-popup';
   });
-  console.log(`  🔍 Popup OK: ${okResult}`);
+  step(`  🔍 Resultado popup OK: ${okResult}`);
+
+  if (okResult === 'popup-found-no-ok') {
+    step('❌ Popup apareceu mas botão OK não encontrado.');
+    return { success: false, error: 'Popup sem botão OK' };
+  }
 
   // Aguarda processamento
   await delay(5000);
-  await page.screenshot({ path: path.join(outputDir, `renew_after_${account}.png`) });
+  await page.screenshot({ path: path.join(outputDir, `renew_after_${account}_t${attempt}.png`) });
 
   // Verifica resultado final
   const result = await page.evaluate(() => {
@@ -322,16 +378,16 @@ export async function renewClient(page: Page, account: string): Promise<boolean>
     const modal = document.querySelector('.ant-modal-wrap:not([style*="display: none"])');
     return modal ? 'modal-still-open' : 'modal-closed';
   });
-  console.log(`  🔍 Resultado final: ${result}`);
+  step(`  🔍 Resultado final: ${result}`);
 
   if (result.includes('success') || okResult.includes('ok-clicked')) {
-    console.log(`  🎉 Renovação de "${account}" concluída com sucesso!`);
-    return true;
+    step('🎉 Renovação concluída com sucesso!');
+    return { success: true };
   } else if (result === 'modal-closed') {
-    console.log(`  🎉 Renovação de "${account}" concluída!`);
-    return true;
+    step('🎉 Renovação concluída (modal fechado)!');
+    return { success: true };
   } else {
-    console.log(`  ⚠️  Renovação pode não ter funcionado — verifique no painel.`);
-    return false;
+    step(`⚠️  Renovação pode não ter funcionado — verifique no painel.`);
+    return { success: false, error: `Resultado inesperado: ${result}` };
   }
 }

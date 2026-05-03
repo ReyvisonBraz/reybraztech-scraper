@@ -52,7 +52,7 @@ export async function runScraper() {
     account: process.env.PANEL_ACCOUNT || '',
     password: process.env.PANEL_PASSWORD || '',
     headless: process.env.HEADLESS === 'true',
-    itemsPerPage: parseInt(process.env.ITEMS_PER_PAGE || '100'),
+    itemsPerPage: parseInt(process.env.ITEMS_PER_PAGE || '500'),
     proxyServer: process.env.PROXY_SERVER || '',
     proxyUser: process.env.PROXY_USERNAME || '',
     proxyPass: process.env.PROXY_PASSWORD || '',

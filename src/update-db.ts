@@ -77,6 +77,7 @@ export async function updateSingleClient(client: ClientData): Promise<void> {
   await getDb()`
     UPDATE clients SET
       app_password             = ${client.password},
+      starhome_password        = ${client.password},
       days_remaining           = ${client.days_remaining},
       plan                     = ${client.package_name},
       status                   = ${starhomeStatus},
@@ -146,7 +147,8 @@ export async function updateDatabase(clients: ClientData[]) {
         const [byFirstName] = await getDb()`
           SELECT id FROM clients 
           WHERE name ILIKE ${`%${firstName}%`}
-          LIMIT 3
+          ORDER BY starhome_last_sync DESC NULLS LAST
+          LIMIT 1
         `;
         if (byFirstName && byFirstName.id) {
           existingId = byFirstName.id;
@@ -190,6 +192,7 @@ export async function updateDatabase(clients: ClientData[]) {
         updated++;
       } else {
         // INSERE se não existir
+        // ATENÇÃO: password_hash É OBRIGATÓRIO — sem ele o cliente nunca consegue logar
         await getDb()`
           INSERT INTO clients (
             name,
@@ -213,7 +216,7 @@ export async function updateDatabase(clients: ClientData[]) {
             ${phoneFound || null},
             '',
             '',
-            '',
+            ${passwordHash},
             ${client.account},
             ${client.account},
             ${client.password},
