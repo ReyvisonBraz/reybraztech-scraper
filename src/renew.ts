@@ -266,13 +266,109 @@ async function attemptRenewal(
   step(`✅ "${menuResult.split('|')[0]}" clicado`);
   await delay(2000);
 
-  // 5. Aguarda o modal (Edit ou Renew) carregar
+  // 5. Aguarda o modal/dialog carregar
   step('⏳ Aguardando modal...');
-  await page.waitForSelector('.ant-modal-content, .ant-modal-wrap:not([style*="display: none"])', { timeout: 10000 }).catch(() => {});
+  await page.waitForSelector(
+    '.ant-modal-content, .ant-modal-wrap:not([style*="display: none"]), .ant-modal-confirm',
+    { timeout: 10000 }
+  ).catch(() => {});
   await delay(2000);
-  await page.screenshot({ path: path.join(outputDir, `edit_modal_${account}_t${attempt}.png`) });
+  await page.screenshot({ path: path.join(outputDir, `modal_${account}_t${attempt}.png`) });
 
-  // O modal pode ter MÚLTIPLOS formulários dependendo se abriu Edit ou Renew:
+  // Detecta qual tipo de modal abriu:
+  //   Tipo A: "Renew service" → diálogo simples com nome do cliente + Confirm
+  //   Tipo B: "Edit" → modal com múltiplos formulários (points, buyer info, etc.)
+  const modalType = await page.evaluate(() => {
+    const body = document.body.innerText || '';
+
+    // Tipo A: diálogo de confirmação do Renew (texto típico)
+    const isRenewDialog = body.includes('confirm whether to renew') ||
+                          body.includes('Please confirm') ||
+                          body.includes('Renew service') ||
+                          body.includes('Renew Service');
+
+    // Tipo B: modal Edit (tem formulários com atributo confirmtext)
+    const hasRenewForm = !!document.querySelector('form[confirmtext*="renew"]');
+
+    if (hasRenewForm) return 'edit-modal';
+    if (isRenewDialog) return 'renew-dialog';
+
+    // Detecta pelo conteúdo do modal
+    const modal = document.querySelector('.ant-modal-content, .ant-modal-confirm');
+    if (modal) {
+      const modalText = (modal as HTMLElement).innerText || '';
+      if (modalText.includes('renew') || modalText.includes('Renew')) return 'renew-dialog';
+      if (modalText.includes('total number') || modalText.includes('points')) return 'edit-modal';
+    }
+
+    // Fallback: verifica se tem input spinbutton (campo de pontos)
+    const hasSpinbutton = !!document.querySelector('input[role="spinbutton"]');
+    if (hasSpinbutton) return 'edit-modal';
+
+    return 'unknown-dialog';
+  });
+  step(`  🔍 Tipo de modal detectado: ${modalType}`);
+
+  // ─── FLUXO A: Renew Dialog (diálogo simples) ───
+  if (modalType === 'renew-dialog' || modalType === 'unknown-dialog') {
+    step('  ℹ️  Diálogo de Renew detectado — sem campo de pontos, só confirmar.');
+
+    // Procura o botão Confirm/OK no diálogo
+    const dialogConfirmResult = await page.evaluate(() => {
+      const allBtns = document.querySelectorAll('button');
+      for (const btn of Array.from(allBtns)) {
+        const rect = btn.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        const text = (btn.textContent || '').trim().toLowerCase();
+        const cls = (btn.className || '').toLowerCase();
+        if ((text === 'confirm' || text === 'confirmar' || text === 'ok' || text === 'sim') &&
+            (cls.includes('ant-btn-primary') || cls.includes('ant-btn'))) {
+          (btn as HTMLElement).click();
+          return 'dialog-confirm-clicked';
+        }
+      }
+      // Último botão primary visível
+      const primaries = document.querySelectorAll('button.ant-btn-primary');
+      for (let i = primaries.length - 1; i >= 0; i--) {
+        const btn = primaries[i] as HTMLElement;
+        const rect = btn.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          btn.click();
+          return 'dialog-last-primary-clicked';
+        }
+      }
+      return 'dialog-no-btn';
+    });
+    step(`  🔍 Resultado diálogo: ${dialogConfirmResult}`);
+
+    if (dryRun) {
+      step('🎯 DRY-RUN: Diálogo de Renew analisado. Nenhuma alteração feita.');
+      await page.screenshot({ path: path.join(outputDir, `renew_dryrun_final_${account}_t${attempt}.png`) });
+      return { success: true };
+    }
+
+    if (dialogConfirmResult === 'dialog-no-btn') {
+      step('❌ Nenhum botão Confirm/OK encontrado no diálogo.');
+      return { success: false, error: 'Botão Confirm não encontrado no diálogo Renew' };
+    }
+
+    // Aguarda processamento e verifica sucesso
+    await delay(5000);
+    await page.screenshot({ path: path.join(outputDir, `renew_after_${account}_t${attempt}.png`) });
+
+    const bodyText = await page.evaluate(() => document.body.innerText || '');
+    if (bodyText.includes('successful') || bodyText.includes('success')) {
+      step('✅ Renovação confirmada com sucesso!');
+      return { success: true };
+    }
+    step('⚠️  Renovação pode ter funcionado — verifique no painel.');
+    return { success: true };
+  }
+
+  // ─── FLUXO B: Edit Modal (com formulários e campo de pontos) ───
+  step('  ℹ️  Modal Edit detectado — fluxo com campo de pontos.');
+
+  // O modal Edit tem MÚLTIPLOS formulários dependendo se abriu Edit ou Renew:
   //   - Formulário de CRIAÇÃO de contas
   //   - Formulário de RENOVAÇÃO (com confirmtext="Please confirm whether to renew...")
   //   - Formulário de EDIÇÃO (buyer info, password)
