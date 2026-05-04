@@ -89,7 +89,7 @@ const MAX_RENEW_RETRIES = 2;
  * 7. Clica Confirm no formulário de renovação
  * 8. Clica OK no popup de confirmação
  */
-export async function renewClient(page: Page, account: string): Promise<boolean> {
+export async function renewClient(page: Page, account: string, dryRun: boolean = false): Promise<boolean> {
   console.log(`\n🔄 Iniciando renovação do cliente: ${account}`);
 
   const outputDir = path.join(__dirname, '..', 'output');
@@ -99,7 +99,7 @@ export async function renewClient(page: Page, account: string): Promise<boolean>
     console.log(`  📍 Tentativa ${attempt}/${MAX_RENEW_RETRIES}...`);
 
     try {
-      const result = await attemptRenewal(page, account, outputDir, attempt);
+      const result = await attemptRenewal(page, account, outputDir, attempt, dryRun);
       if (result.success) {
         console.log(`  🎉 Renovação de "${account}" concluída com sucesso!`);
         return true;
@@ -129,7 +129,8 @@ async function attemptRenewal(
   page: Page,
   account: string,
   outputDir: string,
-  attempt: number
+  attempt: number,
+  dryRun: boolean = false
 ): Promise<{ success: boolean; error?: string }> {
   const step = (msg: string) => console.log(`  ${msg}`);
 
@@ -297,6 +298,15 @@ async function attemptRenewal(
   if (confirmResult === 'confirm-btn-not-found-in-renew-form') {
     step('❌ Botão Confirm não encontrado no formulário de renovação.');
     return { success: false, error: 'Botão Confirm não encontrado' };
+  }
+
+  // DRY-RUN: Para aqui! Não clica em Confirm nem OK no popup
+  if (dryRun) {
+    step('🎯 DRY-RUN: Simulação concluída! Verifique os screenshots em output/');
+    step(`   → Pontos preenchidos, modal Edit aberto, cliente "${account}" pronto para renovar.`);
+    step(`   → Se fosse real, clicaria "Confirm" e "OK" no popup.`);
+    await page.screenshot({ path: path.join(outputDir, `renew_dryrun_final_${account}_t${attempt}.png`) });
+    return { success: true };
   }
 
   // PASSO 6: Aguarda o popup "Please confirm whether to renew this account." e clica OK

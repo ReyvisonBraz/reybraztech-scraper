@@ -13,6 +13,7 @@ function parseArgs() {
     renew: '',
     searchBy: 'account' as 'account' | 'buyer_name' | 'phone',
     sync: false,
+    dryRun: false,
   };
 
   for (const arg of args) {
@@ -30,6 +31,8 @@ function parseArgs() {
       else config.searchBy = 'account';
     } else if (arg === '--sync') {
       config.sync = true;
+    } else if (arg === '--dry-run' || arg === '--simulate') {
+      config.dryRun = true;
     }
   }
 
@@ -75,9 +78,10 @@ export async function runScraper() {
     console.log(`   Query: "${args.search}"`);
     console.log(`   Tipo: ${args.searchBy}`);
   } else if (args.renew) {
-    console.log(`\n🔄 Modo RENOVAÇÃO:`);
+    console.log(`\n🔄 Modo RENOVAÇÃO${args.dryRun ? ' (SIMULAÇÃO/DRY-RUN)' : ''}:`);
     console.log(`   Query: "${args.renew}"`);
     console.log(`   Tipo: ${args.searchBy}`);
+    if (args.dryRun) console.log(`   ⚠️  DRY-RUN: Não confirmará a renovação no painel!`);
   } else if (args.sync) {
     console.log(`\n🔄 Modo SINCRONIZAÇÃO COMPLETA:`);
   } else {
@@ -130,33 +134,39 @@ export async function runScraper() {
         console.log(`\n🔄 Iniciando renovação...`);
       }
 
-      const success = await renewClient(session.page, targetAccount);
+      const success = await renewClient(session.page, targetAccount, args.dryRun);
 
       if (success) {
-        console.log(`\n✅ Renovação concluída: ${clientName} (${targetAccount})`);
+        if (args.dryRun) {
+          console.log(`\n🎯 Simulação concluída! Tudo pronto para renovar ${clientName} (${targetAccount})`);
+          console.log(`   ⚠️  Nenhuma alteração foi feita no painel.`);
+          fs.writeFileSync(outputPath, JSON.stringify({ success: true, dryRun: true, account: targetAccount, clientName }, null, 2));
+        } else {
+          console.log(`\n✅ Renovação concluída: ${clientName} (${targetAccount})`);
 
-        // Busca dados frescos do cliente e atualiza só ele no banco
-        if (process.env.DATABASE_URL) {
-          try {
-            console.log(`\n💾 Atualizando ${targetAccount} no banco...`);
-            const freshClient = await searchAndExtractClient(session.page, targetAccount, 'account');
-            if (freshClient) {
-              await updateSingleClient(freshClient);
-              fs.writeFileSync(outputPath, JSON.stringify({
-                success: true,
-                account: targetAccount,
-                clientName: freshClient.buyer_name || clientName,
-                days_remaining: freshClient.days_remaining,
-              }, null, 2));
-            } else {
+          // Busca dados frescos do cliente e atualiza só ele no banco
+          if (process.env.DATABASE_URL) {
+            try {
+              console.log(`\n💾 Atualizando ${targetAccount} no banco...`);
+              const freshClient = await searchAndExtractClient(session.page, targetAccount, 'account');
+              if (freshClient) {
+                await updateSingleClient(freshClient);
+                fs.writeFileSync(outputPath, JSON.stringify({
+                  success: true,
+                  account: targetAccount,
+                  clientName: freshClient.buyer_name || clientName,
+                  days_remaining: freshClient.days_remaining,
+                }, null, 2));
+              } else {
+                fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: targetAccount, clientName }, null, 2));
+              }
+            } catch (dbErr: any) {
+              console.error(`   ⚠️  Erro ao atualizar banco pós-renew: ${dbErr.message}`);
               fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: targetAccount, clientName }, null, 2));
             }
-          } catch (dbErr: any) {
-            console.error(`   ⚠️  Erro ao atualizar banco pós-renew: ${dbErr.message}`);
+          } else {
             fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: targetAccount, clientName }, null, 2));
           }
-        } else {
-          fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: targetAccount, clientName }, null, 2));
         }
       } else {
         console.log(`\n❌ Falha na renovação de: ${clientName} (${targetAccount})`);
