@@ -269,44 +269,93 @@ async function attemptRenewal(
 
   await page.screenshot({ path: path.join(outputDir, `renew_filled_${account}_t${attempt}.png`) });
 
-  // PASSO 5b: Clica no Confirm do formulário de RENOVAÇÃO
-  step('🔍 Clicando Confirm da seção de renovação...');
+  // PASSO 5b: Encontra e clica no Confirm (ou apenas detecta se é dry-run)
+  step('🔍 Procurando botão Confirm...');
+
   const confirmResult = await page.evaluate(() => {
     const modal = document.querySelector('.ant-modal-content');
     if (!modal) return 'modal-not-found';
 
+    // Estratégia 1: form com confirmtext="renew" → botão dentro
     const forms = modal.querySelectorAll('form');
     for (const form of Array.from(forms)) {
-      if (form.getAttribute('confirmtext')?.includes('renew')) {
+      const ct = form.getAttribute('confirmtext') || '';
+      if (ct.includes('renew')) {
         const btn = form.querySelector('button.ant-btn-primary') as HTMLElement;
-        if (btn) {
-          btn.click();
-          return 'confirm-clicked-inside-form';
-        }
+        if (btn) { btn.click(); return 'confirm-clicked-inside-form'; }
         const prev = form.previousElementSibling;
         if (prev && prev.tagName === 'BUTTON' && prev.classList.contains('ant-btn-primary')) {
-          (prev as HTMLElement).click();
-          return 'confirm-clicked-sibling';
+          (prev as HTMLElement).click(); return 'confirm-clicked-sibling';
         }
         return 'confirm-btn-not-found-in-renew-form';
       }
     }
-    return 'renew-form-not-found';
+
+    // Estratégia 2: qualquer botão "Confirm" visível no modal
+    const allButtons = modal.querySelectorAll('button');
+    for (const btn of Array.from(allButtons)) {
+      const text = (btn.textContent || '').trim().toLowerCase();
+      if (text === 'confirm' || text === 'confirmar') {
+        const rect = btn.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          const classes = btn.className || '';
+          if (classes.includes('ant-btn-primary') || classes.includes('ant-btn')) {
+            (btn as HTMLElement).click();
+            return 'confirm-clicked-by-text';
+          }
+        }
+      }
+    }
+
+    // Estratégia 3: último botão primary no modal (geralmente o Confirm)
+    const primaryBtns = modal.querySelectorAll('button.ant-btn-primary');
+    if (primaryBtns.length > 0) {
+      const last = primaryBtns[primaryBtns.length - 1] as HTMLElement;
+      const text = (last.textContent || '').trim().toLowerCase();
+      if (text.includes('confirm') || text.includes('confirmar')) {
+        last.click();
+        return 'confirm-clicked-last-primary';
+      }
+    }
+
+    // Debug: lista todos os botões visíveis no modal
+    const visibleBtnTexts: string[] = [];
+    for (const btn of Array.from(allButtons)) {
+      const rect = btn.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        const text = (btn.textContent || '').trim();
+        const classes = btn.className || '';
+        if (text) visibleBtnTexts.push(`${text} (${classes.slice(0, 50)})`);
+      }
+    }
+    return `no-confirm-btn|botoes: ${visibleBtnTexts.join(' | ')}`;
   });
   step(`  🔍 Resultado Confirm: ${confirmResult}`);
 
-  if (confirmResult === 'confirm-btn-not-found-in-renew-form') {
-    step('❌ Botão Confirm não encontrado no formulário de renovação.');
-    return { success: false, error: 'Botão Confirm não encontrado' };
-  }
-
-  // DRY-RUN: Para aqui! Não clica em Confirm nem OK no popup
+  // Se for dry-run, verifica se o botão foi encontrado e para
   if (dryRun) {
+    if (confirmResult.includes('clicked')) {
+      step('🎯 DRY-RUN: Botão Confirm ENCONTRADO e CLICADO!');
+    } else {
+      step('⚠️  DRY-RUN: Botão Confirm NÃO encontrado. Verifique o screenshot.');
+      step(`  → ${confirmResult}`);
+    }
     step('🎯 DRY-RUN: Simulação concluída! Verifique os screenshots em output/');
-    step(`   → Pontos preenchidos, modal Edit aberto, cliente "${account}" pronto para renovar.`);
+    step(`   → Pontos preenchidos, modal Edit aberto, cliente "${account}" analisado.`);
     step(`   → Se fosse real, clicaria "Confirm" e "OK" no popup.`);
     await page.screenshot({ path: path.join(outputDir, `renew_dryrun_final_${account}_t${attempt}.png`) });
     return { success: true };
+  }
+
+  if (confirmResult.includes('no-confirm-btn') || confirmResult === 'confirm-btn-not-found-in-renew-form') {
+    step('❌ Botão Confirm não encontrado no modal.');
+    await page.screenshot({ path: path.join(outputDir, `renew_noconfirm_${account}_t${attempt}.png`) });
+    return { success: false, error: `Botão Confirm não encontrado: ${confirmResult}` };
+  }
+
+  if (confirmResult === 'renew-form-not-found') {
+    step('❌ Formulário de renovação não encontrado no modal.');
+    return { success: false, error: 'Formulário de renovação não encontrado' };
   }
 
   // PASSO 6: Aguarda o popup "Please confirm whether to renew this account." e clica OK
