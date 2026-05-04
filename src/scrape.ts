@@ -662,3 +662,45 @@ async function goToNextPage(page: Page): Promise<boolean> {
   console.log('  📋 Última página alcançada');
   return false;
 }
+
+/**
+ * Remove JSONs de clientes antigos da pasta docs/, mantendo apenas os N mais recentes.
+ */
+function cleanupOldClientJSONs(docsDir: string, keepCount: number): void {
+  try {
+    const fs = require('fs');
+    if (!fs.existsSync(docsDir)) return;
+    const files = fs.readdirSync(docsDir)
+      .filter((f: string) => f.startsWith('clients_') && f.endsWith('.json'))
+      .sort()
+      .reverse();
+    while (files.length > keepCount) {
+      const toRemove = files.pop()!;
+      fs.unlinkSync(path.join(docsDir, toRemove));
+      console.log(`  🗑️  JSON antigo removido: docs/${toRemove}`);
+    }
+  } catch (err) {
+    console.log(`  ⚠️  Erro ao limpar JSONs antigos: ${err}`);
+  }
+}
+
+/**
+ * Remove screenshots antigos da pasta output/, mantendo apenas os N mais recentes.
+ */
+function cleanupOldScreenshots(outputDir: string, keepCount: number): void {
+  try {
+    const fs = require('fs');
+    if (!fs.existsSync(outputDir)) return;
+    const screenshots = fs.readdirSync(outputDir)
+      .filter((f: string) => f.endsWith('.png'))
+      .map((f: string) => ({ name: f, mtime: fs.statSync(path.join(outputDir, f)).mtimeMs }))
+      .sort((a: any, b: any) => b.mtime - a.mtime);
+    while (screenshots.length > keepCount) {
+      const toRemove = screenshots.pop()!;
+      fs.unlinkSync(path.join(outputDir, toRemove.name));
+      console.log(`  🗑️  Screenshot antigo removido: output/${toRemove.name}`);
+    }
+  } catch (err) {
+    console.log(`  ⚠️  Erro ao limpar screenshots: ${err}`);
+  }
+}
