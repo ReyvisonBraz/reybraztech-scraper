@@ -169,11 +169,32 @@ async function attemptRenewal(
   }
   step('✅ Conta encontrada!');
 
-  // 3. Clica nas 3 bolinhas
+  // Garante viewport grande para evitar que menu/dropdown cortem itens
+  await page.setViewport({ width: 1920, height: 1080 });
+  await delay(500);
+
+  // 3. Clica nas 3 bolinhas (menu de ações)
   step('🖱️  Abrindo menu de ações...');
-  const moreBtn = await page.$('tr[data-target-account="true"] .icon-more') ||
-                  await page.$('tr[data-target-account="true"] .anticon-more') ||
-                  await page.$('tr[data-target-account="true"] [aria-label="more"]');
+  const moreBtnSelectors = [
+    'tr[data-target-account="true"] .icon-more',
+    'tr[data-target-account="true"] .anticon-more',
+    'tr[data-target-account="true"] [aria-label="more"]',
+    'tr[data-target-account="true"] .ant-dropdown-trigger',
+    'tr[data-target-account="true"] button.ant-btn-icon-only',
+  ];
+
+  let moreBtn = null;
+  for (const sel of moreBtnSelectors) {
+    moreBtn = await page.$(sel).catch(() => null);
+    if (moreBtn) {
+      const visible = await moreBtn.evaluate((el: Element) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      });
+      if (visible) break;
+      moreBtn = null;
+    }
+  }
 
   if (!moreBtn) {
     step('❌ Botão "..." não encontrado na linha do cliente.');
@@ -181,46 +202,77 @@ async function attemptRenewal(
     return { success: false, error: 'Botão de menu não encontrado' };
   }
 
+  // Scrolla a linha para dentro da viewport antes de clicar
+  await moreBtn.evaluate((el: Element) => el.scrollIntoView({ block: 'center' }));
+  await delay(300);
   await moreBtn.click();
   step('✅ Menu aberto');
   await delay(1500);
+  await page.screenshot({ path: path.join(outputDir, `renew_menu_${account}_t${attempt}.png`) });
 
-  // 4. Clica em "Edit" (NÃO "Renew service" — esse cria contas novas!)
-  step('🔍 Clicando "Edit"...');
-  const editClicked = await page.evaluate(() => {
-    const spans = document.querySelectorAll('span.ml-1');
-    for (const span of Array.from(spans)) {
-      if ((span.textContent || '').trim().toLowerCase() === 'edit') {
-        (span as HTMLElement).click();
-        return true;
+  // 4. Decide qual opção clicar no menu
+  // Tenta primeiro "Renew service" (se existir), senão "Edit"
+  step('🔍 Procurando opção no menu...');
+  const menuResult = await page.evaluate(() => {
+    // Coleta todos os itens visíveis do dropdown
+    const items: string[] = [];
+    const allItems = document.querySelectorAll(
+      '.ant-dropdown-menu-item, .ant-dropdown-menu-item span, span.ml-1, .ant-dropdown:not(.ant-dropdown-hidden) li'
+    );
+
+    for (const el of Array.from(allItems)) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+      const text = (el.textContent || '').trim().toLowerCase();
+      if (!text || text.length > 30) continue;
+      items.push(text);
+    }
+
+    // Loga todos os itens encontrados para debug
+    const menuDebug = items.join(' | ');
+
+    // Tenta clicar em "Renew service" ou "Renew" primeiro
+    for (const el of Array.from(allItems)) {
+      const text = (el.textContent || '').trim().toLowerCase();
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+      if (text === 'renew' || text === 'renew service' || text === 'renovar') {
+        (el as HTMLElement).click();
+        return 'renew-clicked|' + menuDebug;
       }
     }
-    const items = document.querySelectorAll('.ant-dropdown-menu-item');
-    for (const item of Array.from(items)) {
-      if ((item.textContent || '').trim().toLowerCase() === 'edit') {
-        (item as HTMLElement).click();
-        return true;
+
+    // Fallback: clica em "Edit"
+    for (const el of Array.from(allItems)) {
+      const text = (el.textContent || '').trim().toLowerCase();
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+      if (text === 'edit' || text === 'editar') {
+        (el as HTMLElement).click();
+        return 'edit-clicked|' + menuDebug;
       }
     }
-    return false;
+
+    return 'no-option|' + menuDebug;
   });
+  step(`  🔍 Resultado menu: ${menuResult}`);
 
-  if (!editClicked) {
-    step('❌ "Edit" não encontrado no menu.');
-    await page.screenshot({ path: path.join(outputDir, `renew_noedit_${account}_t${attempt}.png`) });
-    return { success: false, error: 'Opção Edit não encontrada no menu' };
+  if (menuResult.startsWith('no-option')) {
+    step('❌ Nenhuma opção (Renew/Edit) encontrada no menu.');
+    await page.screenshot({ path: path.join(outputDir, `renew_nomenu_${account}_t${attempt}.png`) });
+    return { success: false, error: `Opção não encontrada. Menu: ${menuResult.split('|')[1] || 'vazio'}` };
   }
 
-  step('✅ "Edit" clicado');
+  step(`✅ "${menuResult.split('|')[0]}" clicado`);
   await delay(2000);
 
-  // 5. Aguarda o modal Edit carregar
-  step('⏳ Aguardando modal Edit...');
-  await page.waitForSelector('.ant-modal-content', { timeout: 10000 }).catch(() => {});
+  // 5. Aguarda o modal (Edit ou Renew) carregar
+  step('⏳ Aguardando modal...');
+  await page.waitForSelector('.ant-modal-content, .ant-modal-wrap:not([style*="display: none"])', { timeout: 10000 }).catch(() => {});
   await delay(2000);
   await page.screenshot({ path: path.join(outputDir, `edit_modal_${account}_t${attempt}.png`) });
 
-  // O modal Edit tem MÚLTIPLOS formulários:
+  // O modal pode ter MÚLTIPLOS formulários dependendo se abriu Edit ou Renew:
   //   - Formulário de CRIAÇÃO de contas
   //   - Formulário de RENOVAÇÃO (com confirmtext="Please confirm whether to renew...")
   //   - Formulário de EDIÇÃO (buyer info, password)

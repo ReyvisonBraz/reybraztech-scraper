@@ -301,7 +301,7 @@ export async function loginToPanel(config: {
   const extraArgs = [
     '--disable-blink-features=AutomationControlled',
     '--disable-features=IsolateOrigins,site-per-process',
-    '--window-size=1280,900',
+    '--window-size=1920,1080',
   ];
 
   let args = isLinux
@@ -325,7 +325,7 @@ export async function loginToPanel(config: {
   const launchOptions: Parameters<typeof puppeteer.launch>[0] = {
     headless: config.headless,
     executablePath: chromePath,
-    defaultViewport: { width: 1280, height: 900 },
+    defaultViewport: { width: 1920, height: 1080 },
     timeout: 60000,
     args: args,
   };
