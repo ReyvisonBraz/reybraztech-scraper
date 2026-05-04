@@ -114,6 +114,12 @@ export async function scrapeClients(page: Page, itemsPerPage: number = 100): Pro
   const docsPath = path.join(docsDir, `clients_${timestamp}.json`);
   fs.writeFileSync(docsPath, JSON.stringify(allClients, null, 2));
 
+  // Limpar JSONs antigos (manter apenas os 5 mais recentes)
+  cleanupOldClientJSONs(docsDir, 5);
+
+  // Limpar screenshots antigos
+  cleanupOldScreenshots(path.join(__dirname, '..', 'output'), 10);
+
   console.log(`  💾 output/clients_extracted.json`);
   console.log(`  💾 docs/clients_${timestamp}.json`);
 
