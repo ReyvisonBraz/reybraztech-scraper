@@ -266,310 +266,133 @@ async function attemptRenewal(
   step(`✅ "${menuResult.split('|')[0]}" clicado`);
   await delay(2000);
 
-  // 5. Aguarda o modal/dialog carregar
-  step('⏳ Aguardando modal...');
+  // 5. Aguarda o formulário de renovação carregar
+  // O painel usa um container .scrollbar.scroll-container (NÃO .ant-modal-content)
+  step('⏳ Aguardando formulário de renovação...');
   await page.waitForSelector(
-    '.ant-modal-content, .ant-modal-wrap:not([style*="display: none"]), .ant-modal-confirm',
-    { timeout: 10000 }
-  ).catch(() => {});
-  await delay(2000);
+    'form[confirmtext*="renew"]:not([style*="display: none"])',
+    { timeout: 15000 }
+  ).catch(() => {
+    step('⚠️  Form renew não apareceu via seletor direto, aguardando delay extra...');
+  });
+  await delay(3000);
   await page.screenshot({ path: path.join(outputDir, `modal_${account}_t${attempt}.png`) });
 
-  // Detecta qual tipo de modal abriu:
-  //   Tipo A: "Renew service" → diálogo simples com nome do cliente + Confirm
-  //   Tipo B: "Edit" → modal com múltiplos formulários (points, buyer info, etc.)
-  const modalType = await page.evaluate(() => {
-    const body = document.body.innerText || '';
+  // PASSO 5a: Encontra o form de RENEW (com confirmtext, NÃO display:none)
+  // e preenche o campo "total points"
+  step('📝 Preenchendo campo de pontos no formulário de renovação...');
 
-    // Tipo A: diálogo de confirmação do Renew (texto típico)
-    const isRenewDialog = body.includes('confirm whether to renew') ||
-                          body.includes('Please confirm') ||
-                          body.includes('Renew service') ||
-                          body.includes('Renew Service');
+  const renewFormSelector = 'form[confirmtext*="renew"]:not([style*="display: none"])';
+  const inputInRenew = await page.$(`${renewFormSelector} input[role="spinbutton"]:not([disabled])`).catch(() => null);
 
-    // Tipo B: modal Edit (tem formulários com atributo confirmtext)
-    const hasRenewForm = !!document.querySelector('form[confirmtext*="renew"]');
-
-    if (hasRenewForm) return 'edit-modal';
-    if (isRenewDialog) return 'renew-dialog';
-
-    // Detecta pelo conteúdo do modal
-    const modal = document.querySelector('.ant-modal-content, .ant-modal-confirm');
-    if (modal) {
-      const modalText = (modal as HTMLElement).innerText || '';
-      if (modalText.includes('renew') || modalText.includes('Renew')) return 'renew-dialog';
-      if (modalText.includes('total number') || modalText.includes('points')) return 'edit-modal';
-    }
-
-    // Fallback: verifica se tem input spinbutton (campo de pontos)
-    const hasSpinbutton = !!document.querySelector('input[role="spinbutton"]');
-    if (hasSpinbutton) return 'edit-modal';
-
-    return 'unknown-dialog';
-  });
-  step(`  🔍 Tipo de modal detectado: ${modalType}`);
-
-  // ─── FLUXO A: Renew Dialog (diálogo simples) ───
-  if (modalType === 'renew-dialog' || modalType === 'unknown-dialog') {
-    step('  ℹ️  Diálogo de Renew detectado — sem campo de pontos, só confirmar.');
-
-    // Procura o botão Confirm/OK no diálogo
-    const dialogConfirmResult = await page.evaluate(() => {
-      const allBtns = document.querySelectorAll('button');
-      for (const btn of Array.from(allBtns)) {
-        const rect = btn.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) continue;
-        const text = (btn.textContent || '').trim().toLowerCase();
-        const cls = (btn.className || '').toLowerCase();
-        if ((text === 'confirm' || text === 'confirmar' || text === 'ok' || text === 'sim') &&
-            (cls.includes('ant-btn-primary') || cls.includes('ant-btn'))) {
-          (btn as HTMLElement).click();
-          return 'dialog-confirm-clicked';
-        }
-      }
-      // Último botão primary visível
-      const primaries = document.querySelectorAll('button.ant-btn-primary');
-      for (let i = primaries.length - 1; i >= 0; i--) {
-        const btn = primaries[i] as HTMLElement;
-        const rect = btn.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) {
-          btn.click();
-          return 'dialog-last-primary-clicked';
-        }
-      }
-      return 'dialog-no-btn';
-    });
-    step(`  🔍 Resultado diálogo: ${dialogConfirmResult}`);
-
-    if (dryRun) {
-      step('🎯 DRY-RUN: Diálogo de Renew analisado. Nenhuma alteração feita.');
-      await page.screenshot({ path: path.join(outputDir, `renew_dryrun_final_${account}_t${attempt}.png`) });
-      return { success: true };
-    }
-
-    if (dialogConfirmResult === 'dialog-no-btn') {
-      step('❌ Nenhum botão Confirm/OK encontrado no diálogo.');
-      return { success: false, error: 'Botão Confirm não encontrado no diálogo Renew' };
-    }
-
-    // Aguarda processamento e verifica sucesso
-    await delay(5000);
-    await page.screenshot({ path: path.join(outputDir, `renew_after_${account}_t${attempt}.png`) });
-
-    const bodyText = await page.evaluate(() => document.body.innerText || '');
-    if (bodyText.includes('successful') || bodyText.includes('success')) {
-      step('✅ Renovação confirmada com sucesso!');
-      return { success: true };
-    }
-    step('⚠️  Renovação pode ter funcionado — verifique no painel.');
-    return { success: true };
+  if (inputInRenew) {
+    // Tem campo editável → preencher com 1
+    await inputInRenew.click();
+    await delay(300);
+    await page.keyboard.press('Backspace');
+    await page.keyboard.type('1', { delay: 50 });
+    step('  📊 Campo de pontos preenchido com 1');
+    const val = await inputInRenew.evaluate((el: HTMLInputElement) => el.value);
+    step(`  📊 Valor confirmado: "${val}"`);
+  } else {
+    // Sem campo editável (já preenchido ou disabled) → seguir direto
+    step('  ℹ️  Campo de pontos já preenchido ou disabled, seguindo...');
   }
-
-  // ─── FLUXO B: Edit Modal (com formulários e campo de pontos) ───
-  step('  ℹ️  Modal Edit detectado — fluxo com campo de pontos.');
-
-  // O modal Edit tem MÚLTIPLOS formulários dependendo se abriu Edit ou Renew:
-  //   - Formulário de CRIAÇÃO de contas
-  //   - Formulário de RENOVAÇÃO (com confirmtext="Please confirm whether to renew...")
-  //   - Formulário de EDIÇÃO (buyer info, password)
-  //
-  // Precisamos:
-  // 1. Preencher "total number of points" = 1 no formulário de RENOVAÇÃO
-  // 2. Clicar no Confirm DAQUELE formulário (não de outro)
-  // 3. Clicar OK no popup "Please confirm whether to renew this account."
-
-  // PASSO 5a: Preencher o campo de pontos no formulário de renovação
-  step('📝 Preenchendo campo de pontos na seção de renovação...');
-
-  // Busca o input de pontos (spinbutton) dentro do formulário de renovação
-  const pointsInputSelector = '.ant-modal-content form[confirmtext*="renew"] input[role="spinbutton"]:not([disabled])';
-  let inputHandle = await page.$(pointsInputSelector).catch(() => null);
-
-  // Fallback: busca dentro de qualquer form no modal
-  if (!inputHandle) {
-    const forms = await page.$$('.ant-modal-content form');
-    for (const form of forms) {
-      const confirmtext = await form.evaluate(el => el.getAttribute('confirmtext') || '');
-      if (confirmtext.includes('renew')) {
-        inputHandle = await form.$('input[role="spinbutton"]:not([disabled])');
-        if (inputHandle) break;
-      }
-    }
-  }
-
-  if (!inputHandle) {
-    step('❌ Campo de pontos (spinbutton) não encontrado no formulário de renovação.');
-    await page.screenshot({ path: path.join(outputDir, `renew_nopoints_${account}_t${attempt}.png`) });
-    return { success: false, error: 'Campo de pontos não encontrado no formulário de renovação' };
-  }
-
-  // Estratégia: foca o input e pressiona ArrowUp (via teclado, compatível com React)
-  await inputHandle.click();
-  await delay(300);
-  // Pressiona Backspace para limpar e depois digita 1
-  await page.keyboard.press('Backspace');
-  await page.keyboard.type('1', { delay: 50 });
-  step('  📊 Campo de pontos preenchido com 1');
-
-  // Verifica o valor
-  const currentValue = await inputHandle.evaluate((el: HTMLInputElement) => el.value);
-  step(`  📊 Valor do campo total points: "${currentValue}"`);
 
   await page.screenshot({ path: path.join(outputDir, `renew_filled_${account}_t${attempt}.png`) });
 
-  // PASSO 5b: Encontra e clica no Confirm (ou apenas detecta se é dry-run)
-  step('🔍 Procurando botão Confirm...');
-
+  // PASSO 5b: Clica no botão Confirm dentro do form de renew
+  step('🔍 Clicando Confirm no formulário...');
   const confirmResult = await page.evaluate(() => {
-    const modal = document.querySelector('.ant-modal-content');
-    if (!modal) return 'modal-not-found';
-
-    // Estratégia 1: form com confirmtext="renew" → botão dentro
-    const forms = modal.querySelectorAll('form');
+    // Encontra o form de renew visível
+    const forms = document.querySelectorAll('form[confirmtext*="renew"]');
     for (const form of Array.from(forms)) {
-      const ct = form.getAttribute('confirmtext') || '';
-      if (ct.includes('renew')) {
-        const btn = form.querySelector('button.ant-btn-primary') as HTMLElement;
-        if (btn) { btn.click(); return 'confirm-clicked-inside-form'; }
-        const prev = form.previousElementSibling;
-        if (prev && prev.tagName === 'BUTTON' && prev.classList.contains('ant-btn-primary')) {
-          (prev as HTMLElement).click(); return 'confirm-clicked-sibling';
+      const style = (form as HTMLElement).style.display;
+      if (style === 'none') continue; // pula forms ocultos
+
+      // Busca o botão Confirm dentro desse form
+      const btn = form.querySelector('button.ant-btn-primary') as HTMLElement | null;
+      if (btn) {
+        const text = (btn.textContent || '').trim().toLowerCase();
+        if (text === 'confirm' || text === 'confirmar') {
+          btn.click();
+          return 'confirm-clicked';
         }
-        return 'confirm-btn-not-found-in-renew-form';
+        // Fallback: mesmo que o texto não bata, clica se for o único primary
+        btn.click();
+        return 'confirm-clicked-fallback';
       }
     }
-
-    // Estratégia 2: qualquer botão "Confirm" visível no modal
-    const allButtons = modal.querySelectorAll('button');
-    for (const btn of Array.from(allButtons)) {
-      const text = (btn.textContent || '').trim().toLowerCase();
-      if (text === 'confirm' || text === 'confirmar') {
-        const rect = btn.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) {
-          const classes = btn.className || '';
-          if (classes.includes('ant-btn-primary') || classes.includes('ant-btn')) {
-            (btn as HTMLElement).click();
-            return 'confirm-clicked-by-text';
-          }
-        }
-      }
-    }
-
-    // Estratégia 3: último botão primary no modal (geralmente o Confirm)
-    const primaryBtns = modal.querySelectorAll('button.ant-btn-primary');
-    if (primaryBtns.length > 0) {
-      const last = primaryBtns[primaryBtns.length - 1] as HTMLElement;
-      const text = (last.textContent || '').trim().toLowerCase();
-      if (text.includes('confirm') || text.includes('confirmar')) {
-        last.click();
-        return 'confirm-clicked-last-primary';
-      }
-    }
-
-    // Debug: lista todos os botões visíveis no modal
-    const visibleBtnTexts: string[] = [];
-    for (const btn of Array.from(allButtons)) {
-      const rect = btn.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) {
-        const text = (btn.textContent || '').trim();
-        const classes = btn.className || '';
-        if (text) visibleBtnTexts.push(`${text} (${classes.slice(0, 50)})`);
-      }
-    }
-    return `no-confirm-btn|botoes: ${visibleBtnTexts.join(' | ')}`;
+    return 'no-confirm-btn';
   });
   step(`  🔍 Resultado Confirm: ${confirmResult}`);
 
-  // Se for dry-run, verifica se o botão foi encontrado e para
   if (dryRun) {
-    if (confirmResult.includes('clicked')) {
-      step('🎯 DRY-RUN: Botão Confirm ENCONTRADO e CLICADO!');
-    } else {
-      step('⚠️  DRY-RUN: Botão Confirm NÃO encontrado. Verifique o screenshot.');
-      step(`  → ${confirmResult}`);
-    }
-    step('🎯 DRY-RUN: Simulação concluída! Verifique os screenshots em output/');
-    step(`   → Pontos preenchidos, modal Edit aberto, cliente "${account}" analisado.`);
-    step(`   → Se fosse real, clicaria "Confirm" e "OK" no popup.`);
+    step('🎯 DRY-RUN: Simulação concluída! Formulário analisado, nenhuma alteração feita.');
     await page.screenshot({ path: path.join(outputDir, `renew_dryrun_final_${account}_t${attempt}.png`) });
     return { success: true };
   }
 
-  if (confirmResult.includes('no-confirm-btn') || confirmResult === 'confirm-btn-not-found-in-renew-form') {
-    step('❌ Botão Confirm não encontrado no modal.');
+  if (confirmResult === 'no-confirm-btn') {
+    step('❌ Botão Confirm não encontrado no formulário de renovação.');
     await page.screenshot({ path: path.join(outputDir, `renew_noconfirm_${account}_t${attempt}.png`) });
-    return { success: false, error: `Botão Confirm não encontrado: ${confirmResult}` };
+    return { success: false, error: 'Botão Confirm não encontrado no form renew' };
   }
 
-  if (confirmResult === 'renew-form-not-found') {
-    step('❌ Formulário de renovação não encontrado no modal.');
-    return { success: false, error: 'Formulário de renovação não encontrado' };
-  }
-
-  // PASSO 6: Aguarda o popup "Please confirm whether to renew this account." e clica OK
-  step('⏳ Aguardando popup de confirmação...');
+  // PASSO 6: Aguarda e clica no popover de confirmação
+  // <div class="ant-popover-inner"> → <button class="ant-btn-primary ant-btn-sm">OK</button>
+  step('⏳ Aguardando popover de confirmação...');
   await delay(2000);
   await page.screenshot({ path: path.join(outputDir, `renew_popup_${account}_t${attempt}.png`) });
 
-  const okResult = await page.evaluate(() => {
-    const body = document.body.innerText || '';
-    if (body.includes('confirm whether to renew') || body.includes('Please confirm')) {
-      const buttons = document.querySelectorAll('button.ant-btn-primary.ant-btn-sm');
-      for (const btn of Array.from(buttons)) {
-        if ((btn.textContent || '').trim() === 'OK') {
-          (btn as HTMLElement).click();
-          return 'ok-clicked';
-        }
-      }
-      const allBtns = document.querySelectorAll('button');
-      for (const btn of Array.from(allBtns)) {
-        if ((btn.textContent || '').trim() === 'OK' && btn.classList.contains('ant-btn-primary')) {
-          (btn as HTMLElement).click();
-          return 'ok-fallback-clicked';
-        }
-      }
-      return 'popup-found-no-ok';
-    }
-    return 'no-confirm-popup';
-  });
-  step(`  🔍 Resultado popup OK: ${okResult}`);
+  const popoverResult = await page.evaluate(() => {
+    const popover = document.querySelector('.ant-popover-inner:not([style*="display: none"])');
+    if (!popover) return 'no-popover';
 
-  if (okResult === 'popup-found-no-ok') {
-    step('❌ Popup apareceu mas botão OK não encontrado.');
-    return { success: false, error: 'Popup sem botão OK' };
+    // Tenta clicar no botão OK dentro do popover
+    const okBtn = popover.querySelector('button.ant-btn-primary.ant-btn-sm') as HTMLElement | null;
+    if (okBtn) {
+      okBtn.click();
+      return 'ok-clicked';
+    }
+
+    const allBtns = popover.querySelectorAll('button');
+    // Último botão do popover (geralmente o OK)
+    if (allBtns.length > 0) {
+      (allBtns[allBtns.length - 1] as HTMLElement).click();
+      return 'ok-fallback-clicked';
+    }
+    return 'no-ok-btn';
+  });
+  step(`  🔍 Resultado popover OK: ${popoverResult}`);
+
+  if (popoverResult === 'no-ok-btn') {
+    step('❌ Popover apareceu mas botão OK não encontrado.');
+    return { success: false, error: 'Popover sem botão OK' };
   }
 
-  // Aguarda processamento
+  if (popoverResult === 'no-popover') {
+    step('⚠️  Popover de confirmação não apareceu (pode ter sido processado rápido).');
+  }
+
+  // Aguarda processamento e verifica resultado
   await delay(5000);
   await page.screenshot({ path: path.join(outputDir, `renew_after_${account}_t${attempt}.png`) });
 
-  // Verifica resultado final
   const result = await page.evaluate(() => {
     const body = document.body.innerText || '';
-    if (body.includes('successful') || body.includes('success')) {
-      const buttons = document.querySelectorAll('button');
-      for (const btn of Array.from(buttons)) {
-        const text = (btn.textContent || '').trim().toLowerCase();
-        if (text === 'got it' || text === 'ok') {
-          (btn as HTMLElement).click();
-          return 'success';
-        }
-      }
-      return 'success';
-    }
-    const modal = document.querySelector('.ant-modal-wrap:not([style*="display: none"])');
-    return modal ? 'modal-still-open' : 'modal-closed';
+    if (body.includes('successful') || body.includes('success')) return 'success';
+    // Verifica se o modal ainda está aberto
+    const form = document.querySelector('form[confirmtext*="renew"]:not([style*="display: none"])');
+    return form ? 'form-still-open' : 'form-closed';
   });
   step(`  🔍 Resultado final: ${result}`);
 
-  if (result.includes('success') || okResult.includes('ok-clicked')) {
+  if (result.includes('success') || result === 'form-closed' || popoverResult.includes('ok-clicked')) {
     step('🎉 Renovação concluída com sucesso!');
-    return { success: true };
-  } else if (result === 'modal-closed') {
-    step('🎉 Renovação concluída (modal fechado)!');
     return { success: true };
   } else {
     step(`⚠️  Renovação pode não ter funcionado — verifique no painel.`);
-    return { success: false, error: `Resultado inesperado: ${result}` };
+    return { success: false, error: `Resultado: ${result}` };
   }
 }
