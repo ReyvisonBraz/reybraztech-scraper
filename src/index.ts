@@ -6,6 +6,7 @@ import { exportAll } from './export';
 import { updateDatabase, updateSingleClient } from './update-db';
 import { renewClient } from './renew';
 import { cleanupOutput } from './cleanup';
+import { notifySyncStart, notifySyncComplete, notifyRenewStart, notifyRenewComplete, notifyError, notifyScraperStarted } from './telegram';
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -96,6 +97,7 @@ export async function runScraper() {
   let browser;
 
   try {
+    const startTime = Date.now();
     const session = await loginToPanel({
       url: config.url,
       account: config.account,
@@ -105,6 +107,9 @@ export async function runScraper() {
       proxyAuth: config.proxyUser ? { username: config.proxyUser, password: config.proxyPass } : undefined,
     });
     browser = session.browser;
+
+    // Notifica que o scraper está online
+    notifyScraperStarted().catch(() => {});
 
     let clients: any[] = [];
 
@@ -135,6 +140,8 @@ export async function runScraper() {
         console.log(`\n🔄 Iniciando renovação...`);
       }
 
+      await notifyRenewStart(clientName, targetAccount);
+
       const success = await renewClient(session.page, targetAccount, args.dryRun);
 
       if (success) {
@@ -144,6 +151,9 @@ export async function runScraper() {
           fs.writeFileSync(outputPath, JSON.stringify({ success: true, dryRun: true, account: targetAccount, clientName }, null, 2));
         } else {
           console.log(`\n✅ Renovação concluída: ${clientName} (${targetAccount})`);
+
+          // Notifica renovação concluída
+          notifyRenewComplete(clientName, targetAccount, 0).catch(() => {});
 
           // Busca dados frescos do cliente e atualiza só ele no banco
           if (process.env.DATABASE_URL) {
@@ -191,6 +201,7 @@ export async function runScraper() {
         console.log(`\n❌ Cliente não encontrado: "${args.search}"`);
       }
     } else {
+      await notifySyncStart();
       clients = await scrapeClients(session.page, config.itemsPerPage);
     }
 
@@ -238,10 +249,24 @@ export async function runScraper() {
     console.log(`   🟡 Vencendo em 3 dias: ${expiring}`);
     console.log(`   🔴 Expirados: ${expired}\n`);
 
+    // Notifica conclusão no Telegram
+    const duration = ((Date.now() - startTime) / 1000).toFixed(0) + 's';
+    notifySyncComplete({
+      total: clients.length,
+      active,
+      inactive,
+      expiring,
+      expired,
+      updated: clients.length,
+      errors: 0,
+      duration,
+    }).catch(() => {});
+
     return clients;
 
-  } catch (error) {
+  } catch (error: any) {
     console.error('\n❌ Erro durante a execução:', error);
+    notifyError('Scraper', error.message || String(error)).catch(() => {});
     throw error;
   } finally {
     if (browser) {

@@ -1,6 +1,7 @@
 import type { Page } from 'puppeteer';
 import * as path from 'path';
 import { debugScreenshot } from './cleanup';
+import { notifySyncProgress } from './telegram';
 
 /** Estrutura de dados de um cliente extraído do painel */
 export interface ClientData {
@@ -84,6 +85,9 @@ export async function scrapeClients(page: Page, itemsPerPage: number = 100): Pro
     console.log(`    ✅ ${pageClients.length} clientes extraídos na página ${currentPage}`);
 
     allClients.push(...pageClients);
+
+    // Notifica progresso a cada página no Telegram
+    notifySyncProgress(currentPage, allClients.length).catch(() => {});
 
     // Para se atingiu o limite de páginas (útil para testes)
     if (pageLimit > 0 && currentPage >= pageLimit) {

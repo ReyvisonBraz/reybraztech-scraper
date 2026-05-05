@@ -15,7 +15,6 @@ export async function sendTelegramMessage(text: string): Promise<boolean> {
   const chatId = process.env.TELEGRAM_CHAT_ID;
 
   if (!token || !chatId) {
-    console.log('  ⚠️  Telegram não configurado no .env');
     return false;
   }
 
@@ -25,12 +24,101 @@ export async function sendTelegramMessage(text: string): Promise<boolean> {
       text,
       parse_mode: 'HTML',
     });
-    console.log('  📱 Mensagem enviada para o Telegram!');
     return true;
   } catch (error: any) {
-    console.log(`  ❌ Erro ao enviar mensagem Telegram: ${error.message}`);
+    console.log(`  ⚠️  Telegram: ${error.message}`);
     return false;
   }
+}
+
+// =====================================================================
+// NOTIFICAÇÕES DE PROGRESSO E STATUS
+// =====================================================================
+
+/** Notifica início de sincronização */
+export async function notifySyncStart(): Promise<void> {
+  await sendTelegramMessage(
+    '🔄 <b>Sincronização Iniciada!</b>\n\n' +
+    '📡 Conectando ao painel StarHome...\n' +
+    '🔐 Realizando login e extraindo dados...'
+  );
+}
+
+/** Notifica progresso da extração (páginas e clientes) */
+export async function notifySyncProgress(page: number, clientsSoFar: number, total?: number): Promise<void> {
+  const totalStr = total ? ` de ~${total}` : '';
+  const now = new Date().toLocaleTimeString('pt-BR');
+  await sendTelegramMessage(
+    `📊 <b>Extraindo dados...</b>\n\n` +
+    `📄 Página: <b>${page}</b>\n` +
+    `👥 Clientes extraídos${totalStr}: <b>${clientsSoFar}</b>\n` +
+    `🕐 ${now}`
+  );
+}
+
+/** Notifica conclusão da sincronização com estatísticas */
+export async function notifySyncComplete(stats: {
+  total: number;
+  active: number;
+  inactive: number;
+  expiring: number;
+  expired: number;
+  updated: number;
+  errors: number;
+  duration: string;
+}): Promise<void> {
+  await sendTelegramMessage(
+    '✅ <b>Sincronização Concluída!</b>\n\n' +
+    `📊 Total de clientes: <b>${stats.total}</b>\n` +
+    `🟢 Ativos: <b>${stats.active}</b>\n` +
+    `⚪ Inativos: <b>${stats.inactive}</b>\n` +
+    `🟡 Expirando (3d): <b>${stats.expiring}</b>\n` +
+    `🔴 Expirados: <b>${stats.expired}</b>\n` +
+    `💾 Atualizados no banco: <b>${stats.updated}</b>\n` +
+    `❌ Erros: <b>${stats.errors}</b>\n` +
+    `⏱️ Duração: <b>${stats.duration}</b>`
+  );
+}
+
+/** Notifica renovação iniciada */
+export async function notifyRenewStart(clientName: string, account: string): Promise<void> {
+  await sendTelegramMessage(
+    `🔄 <b>Renovação Iniciada!</b>\n\n` +
+    `👤 Cliente: <b>${clientName}</b>\n` +
+    `🔑 Account: <code>${account}</code>\n` +
+    `📡 Navegando até o painel para renovar...`
+  );
+}
+
+/** Notifica renovação concluída */
+export async function notifyRenewComplete(clientName: string, account: string, daysRemaining: number): Promise<void> {
+  await sendTelegramMessage(
+    `🎉 <b>Renovação Concluída!</b>\n\n` +
+    `👤 Cliente: <b>${clientName}</b>\n` +
+    `🔑 Account: <code>${account}</code>\n` +
+    `📅 Dias restantes: <b>${daysRemaining}</b>\n\n` +
+    `⚠️ Os dias levam até 5 min para atualizar no painel.`
+  );
+}
+
+/** Notifica erro com detalhes */
+export async function notifyError(operation: string, error: string, context?: string): Promise<void> {
+  await sendTelegramMessage(
+    `🚨 <b>Erro na operação!</b>\n\n` +
+    `⚙️ Operação: <b>${operation}</b>\n` +
+    `❌ Erro: <b>${error}</b>\n` +
+    (context ? `📋 Contexto: ${context}\n` : '') +
+    `🕐 ${new Date().toLocaleTimeString('pt-BR')}`
+  );
+}
+
+/** Notifica que o scraper iniciou */
+export async function notifyScraperStarted(): Promise<void> {
+  await sendTelegramMessage(
+    '🤖 <b>Scraper Iniciado!</b>\n\n' +
+    'O robô de automação do StarHome está online e pronto.\n' +
+    `🕐 ${new Date().toLocaleString('pt-BR')}`
+  );
 }
 
 /**
