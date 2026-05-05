@@ -1,6 +1,7 @@
 import type { Page } from 'puppeteer';
 import * as path from 'path';
 import * as fs from 'fs';
+import { debugScreenshot } from './cleanup';
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -198,7 +199,7 @@ async function attemptRenewal(
 
   if (!moreBtn) {
     step('❌ Botão "..." não encontrado na linha do cliente.');
-    await page.screenshot({ path: path.join(outputDir, `renew_nobtn_${account}_t${attempt}.png`) });
+    await debugScreenshot(page, path.join(outputDir, `renew_nobtn_${account}_t${attempt}.png`));
     return { success: false, error: 'Botão de menu não encontrado' };
   }
 
@@ -208,7 +209,7 @@ async function attemptRenewal(
   await moreBtn.click();
   step('✅ Menu aberto');
   await delay(1500);
-  await page.screenshot({ path: path.join(outputDir, `renew_menu_${account}_t${attempt}.png`) });
+  await debugScreenshot(page, path.join(outputDir, `renew_menu_${account}_t${attempt}.png`));
 
   // 4. Decide qual opção clicar no menu
   // Tenta primeiro "Renew service" (se existir), senão "Edit"
@@ -259,7 +260,7 @@ async function attemptRenewal(
 
   if (menuResult.startsWith('no-option')) {
     step('❌ Nenhuma opção (Renew/Edit) encontrada no menu.');
-    await page.screenshot({ path: path.join(outputDir, `renew_nomenu_${account}_t${attempt}.png`) });
+    await debugScreenshot(page, path.join(outputDir, `renew_nomenu_${account}_t${attempt}.png`));
     return { success: false, error: `Opção não encontrada. Menu: ${menuResult.split('|')[1] || 'vazio'}` };
   }
 
@@ -276,7 +277,7 @@ async function attemptRenewal(
     step('⚠️  Form renew não apareceu via seletor direto, aguardando delay extra...');
   });
   await delay(3000);
-  await page.screenshot({ path: path.join(outputDir, `modal_${account}_t${attempt}.png`) });
+  await debugScreenshot(page, path.join(outputDir, `modal_${account}_t${attempt}.png`));
 
   // PASSO 5a: Encontra o form de RENEW (com confirmtext, NÃO display:none)
   // e preenche o campo "total points"
@@ -299,7 +300,7 @@ async function attemptRenewal(
     step('  ℹ️  Campo de pontos já preenchido ou disabled, seguindo...');
   }
 
-  await page.screenshot({ path: path.join(outputDir, `renew_filled_${account}_t${attempt}.png`) });
+  await debugScreenshot(page, path.join(outputDir, `renew_filled_${account}_t${attempt}.png`));
 
   // PASSO 5b: Clica no botão Confirm dentro do form de renew
   step('🔍 Clicando Confirm no formulário...');
@@ -329,13 +330,13 @@ async function attemptRenewal(
 
   if (dryRun) {
     step('🎯 DRY-RUN: Simulação concluída! Formulário analisado, nenhuma alteração feita.');
-    await page.screenshot({ path: path.join(outputDir, `renew_dryrun_final_${account}_t${attempt}.png`) });
+    await debugScreenshot(page, path.join(outputDir, `renew_dryrun_final_${account}_t${attempt}.png`));
     return { success: true };
   }
 
   if (confirmResult === 'no-confirm-btn') {
     step('❌ Botão Confirm não encontrado no formulário de renovação.');
-    await page.screenshot({ path: path.join(outputDir, `renew_noconfirm_${account}_t${attempt}.png`) });
+    await debugScreenshot(page, path.join(outputDir, `renew_noconfirm_${account}_t${attempt}.png`));
     return { success: false, error: 'Botão Confirm não encontrado no form renew' };
   }
 
@@ -343,7 +344,7 @@ async function attemptRenewal(
   // <div class="ant-popover-inner"> → <button class="ant-btn-primary ant-btn-sm">OK</button>
   step('⏳ Aguardando popover de confirmação...');
   await delay(2000);
-  await page.screenshot({ path: path.join(outputDir, `renew_popup_${account}_t${attempt}.png`) });
+  await debugScreenshot(page, path.join(outputDir, `renew_popup_${account}_t${attempt}.png`));
 
   const popoverResult = await page.evaluate(() => {
     const popover = document.querySelector('.ant-popover-inner:not([style*="display: none"])');
@@ -377,7 +378,7 @@ async function attemptRenewal(
 
   // Aguarda processamento e verifica resultado
   await delay(5000);
-  await page.screenshot({ path: path.join(outputDir, `renew_after_${account}_t${attempt}.png`) });
+  await debugScreenshot(page, path.join(outputDir, `renew_after_${account}_t${attempt}.png`));
 
   const result = await page.evaluate(() => {
     const body = document.body.innerText || '';

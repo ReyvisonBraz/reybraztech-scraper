@@ -6,6 +6,7 @@ import * as path from 'path';
 import { solveCaptcha } from './captcha';
 import { sendTelegramMessage } from './telegram';
 import { waitFor2FACode } from './twofa';
+import { debugScreenshot } from './cleanup';
 import type { Page, Browser } from 'puppeteer';
 
 // Configura o plugin Stealth para evitar detecção por bots (ex: Cloudflare)
@@ -513,7 +514,7 @@ export async function loginToPanel(config: {
         console.log(`    ⚠️ [${loginAttempts}/${maxLoginAttempts}] Login falhou — captcha incorreto ou sessão expirada.`);
         console.log(`    🔄 Renovando captcha para próxima tentativa...`);
         // Salva screenshot para debug
-        await page.screenshot({ path: path.join(__dirname, '..', 'output', `login_fail_attempt_${loginAttempts}.png`) });
+        await debugScreenshot(page, path.join(__dirname, '..', 'output', `login_fail_attempt_${loginAttempts}.png`));
         // Clica na imagem do captcha para gerar um novo código
         const captchaImgSelectors = ['img[src*="captcha"]', '.code-img', 'form img'];
         for (const sel of captchaImgSelectors) {

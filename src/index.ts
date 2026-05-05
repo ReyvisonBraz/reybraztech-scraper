@@ -5,6 +5,7 @@ import { scrapeClients, searchAndExtractClient } from './scrape';
 import { exportAll } from './export';
 import { updateDatabase, updateSingleClient } from './update-db';
 import { renewClient } from './renew';
+import { cleanupOutput } from './cleanup';
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -247,6 +248,7 @@ export async function runScraper() {
       console.log('🔒 Fechando navegador...');
       await browser.close();
     }
+    cleanupOutput();
   }
 }
 

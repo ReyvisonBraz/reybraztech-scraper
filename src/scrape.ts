@@ -1,5 +1,6 @@
 import type { Page } from 'puppeteer';
 import * as path from 'path';
+import { debugScreenshot } from './cleanup';
 
 /** Estrutura de dados de um cliente extraído do painel */
 export interface ClientData {
@@ -36,10 +37,10 @@ export async function scrapeClients(page: Page, itemsPerPage: number = 100): Pro
   // Aguarda a tabela carregar (após SPA + API)
   console.log('  ⏳ Aguardando tabela de contas carregar...');
   await delay(3000);
-  await page.waitForSelector('.ant-table-row, .el-table__row, tr.ant-table-row', { timeout: 30000 }).catch(() => {
+  await page.waitForSelector('.ant-table-row, .el-table__row, tr.ant-table-row', { timeout: 30000 }).catch(async () => {
     console.log('  ⚠️  Linhas da tabela não apareceram em 30s.');
     console.log('  📸 Tirando screenshot da tela para debug...');
-    page.screenshot({ path: path.join(__dirname, '..', 'output', 'scrape_table_timeout.png') }).catch(() => {});
+    await debugScreenshot(page, path.join(__dirname, '..', 'output', 'scrape_table_timeout.png'));
   });
   await delay(1500);
 
