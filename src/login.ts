@@ -394,9 +394,26 @@ export async function loginToPanel(config: {
     console.log('  ⚠️ Cloudflare challenge pode ainda estar ativo, tentando prosseguir...');
   });
 
-  // Espera extra para SPA renderizar (Vue/React podem demorar, especialmente após Cloudflare)
-  console.log('  ⏳ Aguardando SPA renderizar...');
-  await delay(5000);
+  // Verifica PRIMEIRO se cookies já estão válidos (caminho rápido)
+  let alreadyLoggedIn = false;
+  try {
+    await page.waitForFunction(
+      () => !window.location.href.includes('login'),
+      { timeout: 8000, polling: 500 }
+    );
+    alreadyLoggedIn = true;
+  } catch {
+    // Ainda na tela de login — precisa preencher o formulário
+  }
+
+  if (alreadyLoggedIn) {
+    console.log('  ✅ Já autenticado via cookies salvos!');
+    return { browser, page };
+  }
+
+  // Aguarda o formulário de login renderizar
+  console.log('  ⏳ Aguardando formulário de login...');
+  await delay(2000);
   try {
     await page.waitForFunction(
       () => {
@@ -407,7 +424,7 @@ export async function loginToPanel(config: {
     );
     console.log('  ✅ Inputs do formulário de login detectados');
   } catch {
-    console.log('  ⚠️ Inputs de login não encontrados via waitForFunction, tentando seletor CSS...');
+    console.log('  ⚠️ Inputs de login não encontrados, tentando seletor CSS...');
   }
 
   // Espera o formulário de login aparecer
@@ -416,25 +433,6 @@ export async function loginToPanel(config: {
     console.log('  ✅ Formulário de login detectado');
   } catch {
     console.log('  ⚠️ Formulário não encontrado diretamente, procurando inputs...');
-  }
-
-  // Verifica se a SPA redirecionou para fora do login (cookies válidos)
-  // Usa waitForFunction para aguardar o hash routing completar (até 15s)
-  // Aumentado para 15s pois após Cloudflare o SPA pode demorar mais
-  let alreadyLoggedIn = false;
-  try {
-    await page.waitForFunction(
-      () => !window.location.href.includes('login'),
-      { timeout: 15000, polling: 500 }
-    );
-    alreadyLoggedIn = true;
-  } catch {
-    // Ainda na tela de login — precisa preencher o formulário
-  }
-
-  if (alreadyLoggedIn) {
-    console.log('  ✅ Já autenticado via cookies salvos!');
-    return { browser, page };
   }
 
   await delay(1000);

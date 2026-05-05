@@ -37,22 +37,20 @@ export async function scrapeClients(page: Page, itemsPerPage: number = 100): Pro
 
   // Aguarda a tabela carregar (após SPA + API)
   console.log('  ⏳ Aguardando tabela de contas carregar...');
-  await delay(3000);
   await page.waitForSelector('.ant-table-row, .el-table__row, tr.ant-table-row', { timeout: 30000 }).catch(async () => {
     console.log('  ⚠️  Linhas da tabela não apareceram em 30s.');
     console.log('  📸 Tirando screenshot da tela para debug...');
     await debugScreenshot(page, path.join(__dirname, '..', 'output', 'scrape_table_timeout.png'));
   });
-  await delay(1500);
+  await delay(500);
 
   await setItemsPerPage(page, itemsPerPage);
 
   // Aguarda a tabela recarregar com o novo tamanho de página
-  await delay(3000);
   await page.waitForSelector('.ant-table-row', { timeout: 20000 }).catch(() => {
     console.log('  ⚠️  Tabela não recarregou após mudar itens por página.');
   });
-  await delay(1000);
+  await delay(500);
 
   // Extração direta e automática (sem interação humana)
   // Mecanismo confirmado: senha está em <span style="display: none;"> sem font-size no DOM
@@ -73,13 +71,13 @@ export async function scrapeClients(page: Page, itemsPerPage: number = 100): Pro
     // Tenta extrair a página com retry (máx 2 tentativas)
     let pageClients = await extractTableData(page);
     if (pageClients.length === 0) {
-      console.log(`    ⚠️  Nenhum cliente extraído — tentando novamente em 2s...`);
-      await delay(2000);
+      console.log(`    ⚠️  Nenhum cliente extraído — tentando novamente em 1s...`);
+      await delay(1000);
       pageClients = await extractTableData(page);
     }
     if (pageClients.length === 0) {
-      console.log(`    ⚠️  Segunda tentativa vazia — última tentativa em 3s...`);
-      await delay(3000);
+      console.log(`    ⚠️  Segunda tentativa vazia — última tentativa em 2s...`);
+      await delay(2000);
       pageClients = await extractTableData(page);
     }
     console.log(`    ✅ ${pageClients.length} clientes extraídos na página ${currentPage}`);
@@ -98,7 +96,7 @@ export async function scrapeClients(page: Page, itemsPerPage: number = 100): Pro
     hasNextPage = await goToNextPage(page);
     if (hasNextPage) {
       currentPage++;
-      await delay(1000);
+      await delay(500);
       await page.waitForSelector('.ant-table-row', { timeout: 10000 }).catch(() => {});
     }
   }
@@ -137,6 +135,20 @@ export async function scrapeClients(page: Page, itemsPerPage: number = 100): Pro
 async function setItemsPerPage(page: Page, items: number): Promise<void> {
   console.log(`  🔍 Configurando ${items} itens por página...`);
   try {
+    // Verifica se já está no tamanho correto (pula se sim)
+    const currentSize = await page.evaluate(() => {
+      const items = document.querySelectorAll('.ant-select-selection-item');
+      for (const item of Array.from(items)) {
+        const text = (item.textContent || '').trim();
+        if (/^\d+/.test(text)) return parseInt(text, 10);
+      }
+      return 0;
+    });
+    if (currentSize === items) {
+      console.log(`  ✅ Já está em ${items}/página, pulando.`);
+      return;
+    }
+
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
 
     // Aguarda a paginação renderizar antes de tentar interagir
@@ -182,7 +194,7 @@ async function setItemsPerPage(page: Page, items: number): Promise<void> {
         await options[i].click();
         console.log(`  📐 Selecionado: "${optionTexts[i]}"`);
         found = true;
-        await delay(3000);
+        await delay(2000);
         break;
       }
     }

@@ -92,91 +92,71 @@ export async function updateSingleClient(client: ClientData): Promise<void> {
 }
 
 export async function updateDatabase(clients: ClientData[]) {
-  console.log(`\n💾 Atualizando ${clients.length} clientes no banco de dados...`);
-  console.log('⚠️ Usando criptografia bcrypt para senhas\n');
+  console.log(`\n💾 Sincronizando ${clients.length} clientes no banco...`);
 
+  const now = new Date();
+  const sql = getDb();
   let updated = 0;
-  let notFound = 0;
+  let inserted = 0;
   let errors = 0;
+
+  // ── Pré-carrega todos os clientes existentes do banco em 2 queries ──
+  type DbClient = { id: number; starhome_account: string | null; name: string; whatsapp: string | null };
+  const existing = await sql`SELECT id, starhome_account, name, whatsapp FROM clients`;
+
+  // Cria mapas para lookup rápido
+  const byStarhome = new Map<string, number>();
+  for (const row of existing) {
+    if (row.starhome_account) byStarhome.set(row.starhome_account, row.id);
+  }
+
+  // ── Processa cada cliente em lote ──
+  const updates: any[] = [];
+  const inserts: any[] = [];
 
   for (const client of clients) {
     try {
-      const { firstName, lastName } = normalizeName(client.buyer_name);
       const starhomeStatus = client.in_use === 'Used' && client.expired !== 'Expired' ? 'Ativo' : 'Inativo';
-      
-      // Criptografar a senha do StarHome
-      const passwordHash = await encryptPassword(client.password);
+      const expirationDate = client.expiration_date ? new Date(client.expiration_date) : null;
 
-      let existingId: number | null = null;
-      let matchType = '';
       let phoneFound = '';
-
       if (client.buyer_name) {
         const phoneMatch = client.buyer_name.match(/\d{10,11}/);
         if (phoneMatch) phoneFound = phoneMatch[0];
       }
 
-      // 1º: Buscar pelo starhome_account (se já vinculado anteriormente)
-      if (client.account) {
-        const [byStarhome] = await getDb()`
-          SELECT id FROM clients WHERE starhome_account = ${client.account}
-          LIMIT 1
-        `;
-        if (byStarhome) {
-          existingId = byStarhome.id;
-          matchType = 'account StarHome';
+      // Tenta encontrar por starhome_account primeiro (mais rápido)
+      let existingId = byStarhome.get(client.account);
+
+      // Fallback: busca por nome/whatsapp se não encontrou por account
+      if (!existingId) {
+        const { firstName, lastName } = normalizeName(client.buyer_name);
+
+        for (const row of existing) {
+          // Nome completo
+          if (firstName && lastName && row.name &&
+              row.name.toLowerCase().includes(firstName.toLowerCase()) &&
+              row.name.toLowerCase().includes(lastName.toLowerCase())) {
+            existingId = row.id;
+            break;
+          }
+          // Primeiro nome
+          if (firstName && row.name &&
+              row.name.toLowerCase().includes(firstName.toLowerCase())) {
+            existingId = row.id;
+            break;
+          }
+          // WhatsApp
+          if (phoneFound && row.whatsapp && row.whatsapp.includes(phoneFound)) {
+            existingId = row.id;
+            break;
+          }
         }
       }
-
-      // 2º: Buscar pelo nome completo (primeiro + último nome)
-      if (!existingId && firstName && lastName) {
-        const [byName] = await getDb()`
-          SELECT id FROM clients 
-          WHERE name ILIKE ${`%${firstName}%`}
-            AND name ILIKE ${`%${lastName}%`}
-          LIMIT 1
-        `;
-        if (byName) {
-          existingId = byName.id;
-          matchType = 'nome completo';
-        }
-      }
-
-      // 3º: Buscar apenas pelo primeiro nome (se não encontrou ainda)
-      if (!existingId && firstName) {
-        const [byFirstName] = await getDb()`
-          SELECT id FROM clients 
-          WHERE name ILIKE ${`%${firstName}%`}
-          ORDER BY starhome_last_sync DESC NULLS LAST
-          LIMIT 1
-        `;
-        if (byFirstName && byFirstName.id) {
-          existingId = byFirstName.id;
-          matchType = 'primeiro nome';
-        }
-      }
-
-      // 4º: Buscar por telefone no formato StarHome (buyer_name pode conter telefone)
-      if (!existingId && phoneFound) {
-        const [byPhone] = await getDb()`
-          SELECT id FROM clients 
-          WHERE whatsapp LIKE ${`%${phoneFound}%`}
-          LIMIT 1
-        `;
-        if (byPhone) {
-          existingId = byPhone.id;
-          matchType = 'telefone';
-        }
-      }
-
-      const now = new Date();
-      const expirationDate = client.expiration_date ? new Date(client.expiration_date) : null;
 
       if (existingId) {
-        // Atualiza dados do StarHome.
-        // app_account/app_password só são preenchidos se estiverem vazios
-        // (eles vêm do login_pool no pagamento, não do StarHome)
-        await getDb()`
+        // UPDATE em lote (sem bcrypt - starhome_password fica em plaintext)
+        updates.push(sql`
           UPDATE clients SET
             starhome_account         = ${client.account},
             starhome_password        = ${client.password},
@@ -191,63 +171,43 @@ export async function updateDatabase(clients: ClientData[]) {
             starhome_expiration_date = ${expirationDate},
             starhome_last_sync       = ${now}
           WHERE id = ${existingId}
-        `;
-        console.log(`   ✅ ${client.buyer_name || client.account} → vinculado (${matchType})`);
+        `);
         updated++;
       } else {
-        // INSERE se não existir
-        // ATENÇÃO: password_hash É OBRIGATÓRIO — sem ele o cliente nunca consegue logar
-        await getDb()`
+        // INSERT em lote (com bcrypt só pra password_hash do app)
+        const passwordHash = await encryptPassword(client.password);
+        inserts.push(sql`
           INSERT INTO clients (
-            name,
-            whatsapp,
-            device,
-            email,
-            password_hash,
-            starhome_account,
-            app_account,
-            app_password,
-            days_remaining,
-            plan,
-            status,
-            starhome_days_remaining,
-            starhome_in_use,
-            starhome_package,
-            starhome_expiration_date,
-            starhome_last_sync
+            name, whatsapp, device, email, password_hash,
+            starhome_account, app_account, app_password,
+            days_remaining, plan, status,
+            starhome_days_remaining, starhome_in_use, starhome_package,
+            starhome_expiration_date, starhome_last_sync
           ) VALUES (
             ${client.buyer_name || `Cliente (${client.account})`},
-            ${phoneFound || null},
-            '',
-            '',
+            ${phoneFound || null}, '', '',
             ${passwordHash},
-            ${client.account},
-            ${client.account},
-            ${client.password},
-            ${client.days_remaining},
-            ${client.package_name},
-            ${starhomeStatus},
-            ${client.days_remaining},
-            ${client.in_use},
-            ${client.package_name},
-            ${expirationDate},
-            ${now}
+            ${client.account}, ${client.account}, ${client.password},
+            ${client.days_remaining}, ${client.package_name}, ${starhomeStatus},
+            ${client.days_remaining}, ${client.in_use}, ${client.package_name},
+            ${expirationDate}, ${now}
           )
-        `;
-        console.log(`   ➕ Novo cadastrado: ${client.account} (${client.buyer_name || 'sem nome'})`);
-        notFound++;
+        `);
+        inserted++;
       }
-
     } catch (err: any) {
       errors++;
-      console.error(`   ❌ Erro ao atualizar ${client.account}: ${err.message.split('\n')[0]}`);
+      console.error(`   ❌ Erro ${client.account}: ${err.message.split('\n')[0]}`);
     }
   }
 
-  console.log(`\n✅ Atualização concluída:`);
-  console.log(`   🔄 ${updated} clientes atualizados`);
-  console.log(`   ⏭️  ${notFound} clientes não encontrados no banco`);
+  // ── Executa tudo em paralelo ──
+  await Promise.allSettled([...updates, ...inserts]);
+
+  console.log(`\n✅ Sincronização concluída:`);
+  console.log(`   🔄 ${updated} atualizados`);
+  console.log(`   ➕ ${inserted} novos`);
   console.log(`   ❌ ${errors} erros`);
 
-  return { updated, notFound, errors };
+  return { updated, notFound: inserted, errors };
 }
