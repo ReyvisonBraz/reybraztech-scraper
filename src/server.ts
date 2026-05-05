@@ -504,6 +504,12 @@ process.on('SIGINT', () => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   log('info', `Scraper server started`, { port: PORT, env: process.env.NODE_ENV || 'development' });
+  sendTelegram(
+    `🟢 <b>Servidor Scraper Online!</b>\n\n` +
+    `🌐 Porta: <b>${PORT}</b>\n` +
+    `🔧 Ambiente: <b>${process.env.NODE_ENV || 'development'}</b>\n` +
+    `🕐 ${new Date().toLocaleString('pt-BR')}`
+  ).catch(() => {});
 });
 
 export default app;
