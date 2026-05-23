@@ -302,6 +302,12 @@ async function attemptRenewal(
 
   await debugScreenshot(page, path.join(outputDir, `renew_filled_${account}_t${attempt}.png`));
 
+  if (dryRun) {
+    step('DRY-RUN: formulario analisado e preenchido. Nenhuma confirmacao foi clicada.');
+    await debugScreenshot(page, path.join(outputDir, `renew_dryrun_final_${account}_t${attempt}.png`));
+    return { success: true };
+  }
+
   // PASSO 5b: Clica no botão Confirm dentro do form de renew
   step('🔍 Clicando Confirm no formulário...');
   const confirmResult = await page.evaluate(() => {

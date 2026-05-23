@@ -27,6 +27,23 @@ function log(level: 'info' | 'warn' | 'error', msg: string, meta?: Record<string
   }
 }
 
+function sanitizeLogChunk(text: string): string {
+  return text
+    .replace(/(Senha:\s*)[^\r\n]+/gi, '$1[redacted]')
+    .replace(/(Password:\s*)[^\r\n]+/gi, '$1[redacted]');
+}
+
+function sanitizeSearchResult(result: { success: boolean; data?: any; error?: string }) {
+  if (!result.data) return result;
+  return {
+    ...result,
+    data: result.data.map((client: any) => ({
+      ...client,
+      password: undefined,
+    })),
+  };
+}
+
 // ─── Telegram helper ──────────────────────────────────────────────────────────
 async function sendTelegram(text: string): Promise<void> {
   if (!TOKEN || !CHAT_ID) return;
@@ -160,7 +177,7 @@ async function runScraper(): Promise<{ success: boolean; clients: number; stats?
     child.stdout.on('data', (d: Buffer) => {
       const t = d.toString();
       stdout += t;
-      log('info', 'scraper stdout', { chunk: t.slice(0, 200) });
+      log('info', 'scraper stdout', { chunk: sanitizeLogChunk(t).slice(0, 200) });
     });
     child.stderr.on('data', (d: Buffer) => {
       const t = d.toString();
@@ -221,7 +238,7 @@ async function runRenew(query: string, searchBy: string): Promise<{ success: boo
     activeScraperPid = child.pid || null;
 
     let stderr = '';
-    child.stdout.on('data', (d: Buffer) => log('info', 'renew stdout', { chunk: d.toString().slice(0, 200) }));
+    child.stdout.on('data', (d: Buffer) => log('info', 'renew stdout', { chunk: sanitizeLogChunk(d.toString()).slice(0, 200) }));
     child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
 
     child.on('close', (code: number) => {
@@ -261,7 +278,7 @@ async function runSearch(query: string, searchBy: string): Promise<{ success: bo
     activeScraperPid = child.pid || null;
 
     let stderr = '';
-    child.stdout.on('data', (d: Buffer) => log('info', 'search stdout', { chunk: d.toString().slice(0, 200) }));
+    child.stdout.on('data', (d: Buffer) => log('info', 'search stdout', { chunk: sanitizeLogChunk(d.toString()).slice(0, 200) }));
     child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
 
     child.on('close', (code: number) => {
@@ -347,7 +364,7 @@ app.post('/run', authenticate, async (req, res) => {
       try {
         addLog(`🔍 Buscando "${query}" por ${by}...`);
         const result = await runSearch(query, by);
-        job.result = result;
+        job.result = sanitizeSearchResult(result);
         if (result.success && result.data) {
           const c = result.data[0];
           addLog(`✅ Encontrado: ${c.buyer_name} | ${c.account} | ${c.days_remaining}d`);

@@ -2,6 +2,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 const OUTPUT_DIR = path.join(__dirname, '..', 'output');
+const RESULT_FILES = new Set([
+  'clients_extracted.json',
+  'client_search.json',
+  'renew_result.json',
+]);
 
 /** Só salva screenshot se NÃO estiver em produção headless */
 export function shouldSaveScreenshots(): boolean {
@@ -34,6 +39,7 @@ export function cleanupOutput(): void {
 
     // Mantém o diretório jobs/ (usado pelo servidor REST)
     if (stat.isDirectory() && file === 'jobs') continue;
+    if (!stat.isDirectory() && RESULT_FILES.has(file)) continue;
 
     try {
       if (stat.isDirectory()) {
