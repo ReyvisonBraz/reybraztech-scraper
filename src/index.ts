@@ -56,7 +56,9 @@ export async function runScraper() {
     url: process.env.PANEL_URL || 'https://panel.web.starhome.vip',
     account: process.env.PANEL_ACCOUNT || '',
     password: process.env.PANEL_PASSWORD || '',
-    headless: process.env.HEADLESS === 'true',
+    headless: process.env.HEADLESS
+      ? process.env.HEADLESS === 'true'
+      : (process.env.NODE_ENV === 'production' || process.platform === 'linux'),
     itemsPerPage: parseInt(process.env.ITEMS_PER_PAGE || '500'),
     proxyServer: process.env.PROXY_SERVER || '',
     proxyUser: process.env.PROXY_USERNAME || '',

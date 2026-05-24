@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import axios from 'axios';
 import crypto from 'crypto';
+import puppeteer from 'puppeteer';
 
 const app = express();
 app.use(express.json());
@@ -171,17 +172,15 @@ async function runScraper(): Promise<{ success: boolean; clients: number; stats?
 
     activeScraperPid = child.pid || null;
 
-    let stdout = '';
     let stderr = '';
 
     child.stdout.on('data', (d: Buffer) => {
       const t = d.toString();
-      stdout += t;
       log('info', 'scraper stdout', { chunk: sanitizeLogChunk(t).slice(0, 200) });
     });
     child.stderr.on('data', (d: Buffer) => {
       const t = d.toString();
-      stderr += t;
+      stderr = (stderr + t).slice(-5000);
       log('error', 'scraper stderr', { chunk: t.slice(0, 200) });
     });
 
@@ -239,7 +238,7 @@ async function runRenew(query: string, searchBy: string): Promise<{ success: boo
 
     let stderr = '';
     child.stdout.on('data', (d: Buffer) => log('info', 'renew stdout', { chunk: sanitizeLogChunk(d.toString()).slice(0, 200) }));
-    child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    child.stderr.on('data', (d: Buffer) => { stderr = (stderr + d.toString()).slice(-5000); });
 
     child.on('close', (code: number) => {
       activeScraperPid = null;
@@ -279,7 +278,7 @@ async function runSearch(query: string, searchBy: string): Promise<{ success: bo
 
     let stderr = '';
     child.stdout.on('data', (d: Buffer) => log('info', 'search stdout', { chunk: sanitizeLogChunk(d.toString()).slice(0, 200) }));
-    child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    child.stderr.on('data', (d: Buffer) => { stderr = (stderr + d.toString()).slice(-5000); });
 
     child.on('close', (code: number) => {
       activeScraperPid = null;
@@ -479,9 +478,18 @@ app.get('/ready', (_req, res) => {
   const checks = {
     apiKeyConfigured: !!API_KEY,
     panelConfigured: !!(process.env.PANEL_ACCOUNT && process.env.PANEL_PASSWORD),
+    chromeExecutable: (() => {
+      try {
+        const executablePath = puppeteer.executablePath();
+        return !!executablePath && fs.existsSync(executablePath);
+      } catch {
+        return false;
+      }
+    })(),
     outputDirWritable: (() => {
       try {
         const testPath = path.join(__dirname, '..', 'output', '.healthcheck');
+        fs.mkdirSync(path.dirname(testPath), { recursive: true });
         fs.writeFileSync(testPath, 'ok');
         fs.unlinkSync(testPath);
         return true;
