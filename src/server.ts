@@ -5,6 +5,12 @@ import fs from 'fs';
 import axios from 'axios';
 import crypto from 'crypto';
 import puppeteer from 'puppeteer';
+import { claimNextJob, markJobDone, markJobFailed, MAX_JOB_ATTEMPTS } from './renewal-queue';
+import { notifyRenewComplete, notifyError } from './telegram';
+import { loginToPanel } from './login';
+import { searchAndExtractClient } from './scrape';
+import { renewClient } from './renew';
+import { updateSingleClient } from './update-db';
 
 const app = express();
 app.use(express.json());
@@ -75,8 +81,10 @@ function authenticate(req: express.Request, res: express.Response, next: express
 
 // ─── Concurrency Lock ─────────────────────────────────────────────────────────
 let activeScraperPid: number | null = null;
+let pageBusy = false;
 
 function isScraperRunning(): boolean {
+  if (pageBusy) return true;
   if (activeScraperPid === null) return false;
   try {
     process.kill(activeScraperPid, 0);
@@ -84,6 +92,137 @@ function isScraperRunning(): boolean {
   } catch {
     activeScraperPid = null;
     return false;
+  }
+}
+
+/**
+ * Executa fn() dentro do lock único do scraper.
+ * - Com sessão persistente: protege a aba única (nunca navega em paralelo).
+ * - Sem sessão persistente: não muda nada (o lock continua sendo o PID).
+ */
+async function withPageLock<T>(fn: () => Promise<T>): Promise<T> {
+  if (!KEEP_OPEN) return fn();
+  if (pageBusy) {
+    throw new Error('Outra operação está usando a sessão persistente. Aguarde.');
+  }
+  pageBusy = true;
+  try {
+    return await fn();
+  } finally {
+    pageBusy = false;
+  }
+}
+
+// ─── Sessão de browser persistente ───────────────────────────────────────────
+// Mantém uma página logada no painel e reusa nas renovações/buscas em vez de
+// spawnar processo novo (relançar Chromium). Padrão ÚNICO: ON por default
+// (dev local e VPS com docker). Desliga só com SCRAPER_KEEP_SESSION_OPEN=false.
+const KEEP_OPEN = process.env.SCRAPER_KEEP_SESSION_OPEN !== 'false';
+let persistentBrowser: import('puppeteer').Browser | null = null;
+let persistentPage: import('puppeteer').Page | null = null;
+let persistentPagePromise: Promise<import('puppeteer').Page> | null = null;
+
+function panelConfig() {
+  return {
+    url: process.env.PANEL_URL || 'https://panel.web.starhome.vip',
+    account: process.env.PANEL_ACCOUNT || '',
+    password: process.env.PANEL_PASSWORD || '',
+    headless: process.env.HEADLESS === 'false' ? false : true,
+    proxy: process.env.PROXY_SERVER || undefined,
+    proxyAuth: process.env.PROXY_USERNAME ? { username: process.env.PROXY_USERNAME, password: process.env.PROXY_PASSWORD || '' } : undefined,
+  };
+}
+
+async function ensurePersistentPage(): Promise<import('puppeteer').Page> {
+  if (!KEEP_OPEN) {
+    throw new Error('SCRAPER_KEEP_SESSION_OPEN não está ativada');
+  }
+  if (persistentPage && !persistentPage.isClosed()) {
+    return persistentPage;
+  }
+  if (persistentPagePromise) {
+    return persistentPagePromise;
+  }
+  persistentPagePromise = (async () => {
+    log('info', 'Iniciando sessão de browser persistente...');
+    const cfg = panelConfig();
+    if (!cfg.account || !cfg.password) {
+      throw new Error('PANEL_ACCOUNT e PANEL_PASSWORD são obrigatórios para a sessão persistente');
+    }
+    const session = await loginToPanel(cfg);
+    persistentBrowser = session.browser;
+    persistentPage = session.page;
+    log('info', 'Sessão persistente pronta');
+    return session.page;
+  })();
+  try {
+    return await persistentPagePromise;
+  } finally {
+    persistentPagePromise = null;
+  }
+}
+
+/**
+ * Reconecta se a sessão persistente caiu (URL contém /login).
+ * Se a reconexão falhar, lança — tratado como falha de job normal (backoff).
+ */
+async function getReadyPersistentPage(): Promise<import('puppeteer').Page> {
+  const page = await ensurePersistentPage();
+  const currentUrl = page.url() || '';
+  if (currentUrl.includes('/login')) {
+    log('warn', 'Sessão persistente caiu — relogando');
+    if (persistentBrowser) {
+      try { await persistentBrowser.close(); } catch {}
+    }
+    persistentBrowser = null;
+    persistentPage = null;
+    return ensurePersistentPage();
+  }
+  return page;
+}
+
+// ─── Fila de renovação (renewal_jobs) ────────────────────────────────────────
+// Poller a cada 30s: pega o próximo job 'queued' vencido e executa a renovação.
+// Concorrência 1: só age quando nenhum outro processo/job está rodando.
+const RENEWAL_POLL_INTERVAL_MS = 30_000;
+
+async function pollRenewalJobs(): Promise<void> {
+  try {
+    if (isScraperRunning()) return;
+
+    const job = await claimNextJob();
+    if (!job) return;
+
+    log('info', 'Renewal job claimed', { jobId: job.id, account: job.starhome_account, attempts: job.attempts });
+
+    let result: { success: boolean; account?: string; clientName?: string; error?: string };
+    try {
+      result = await withPageLock(() => runRenew(job.starhome_account, 'account'));
+    } catch (err: any) {
+      result = { success: false, error: err.message || String(err) };
+    }
+
+    const attempts = job.attempts + 1;
+
+    if (result.success) {
+      await markJobDone(job.id);
+      log('info', 'Renewal job done', { jobId: job.id, account: result.account || job.starhome_account });
+      await notifyRenewComplete(result.clientName || result.account || job.starhome_account, result.account || job.starhome_account, 0).catch(() => {});
+    } else {
+      const errorMsg = result.error || 'Falha desconhecida na renovação';
+      log('warn', 'Renewal job failed', { jobId: job.id, attempts, error: errorMsg });
+      await markJobFailed(job.id, errorMsg, attempts, MAX_JOB_ATTEMPTS);
+      if (attempts >= MAX_JOB_ATTEMPTS) {
+        // Alerta humano: único, só no esgotamento das tentativas de job
+        await notifyError(
+          'Renovação StarHome',
+          errorMsg,
+          `Account: ${job.starhome_account}\nTentativas: ${attempts}/${MAX_JOB_ATTEMPTS}\nJob: ${job.id}`
+        ).catch(() => {});
+      }
+    }
+  } catch (err: any) {
+    log('error', 'pollRenewalJobs error', { error: err.message });
   }
 }
 
@@ -166,7 +305,6 @@ async function runScraper(): Promise<{ success: boolean; clients: number; stats?
     const child = spawn('node', ['dist/index.js', '--sync'], {
       cwd: projectRoot,
       env: { ...process.env },
-      shell: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -179,7 +317,7 @@ async function runScraper(): Promise<{ success: boolean; clients: number; stats?
       log('info', 'scraper stdout', { chunk: sanitizeLogChunk(t).slice(0, 200) });
     });
     child.stderr.on('data', (d: Buffer) => {
-      const t = d.toString();
+      const t = sanitizeLogChunk(d.toString());
       stderr = (stderr + t).slice(-5000);
       log('error', 'scraper stderr', { chunk: t.slice(0, 200) });
     });
@@ -225,20 +363,60 @@ async function runScraper(): Promise<{ success: boolean; clients: number; stats?
 
 // ─── Renew single client ──────────────────────────────────────────────────────
 async function runRenew(query: string, searchBy: string): Promise<{ success: boolean; account?: string; clientName?: string; error?: string }> {
+  // Sessão persistente ativa: reusa a página logada (sem religar o Chromium)
+  if (KEEP_OPEN) {
+    try {
+      const page = await getReadyPersistentPage();
+      let targetAccount = query;
+      let clientName = query;
+
+      if (searchBy !== 'account') {
+        const client = await searchAndExtractClient(page, query, searchBy as 'buyer_name' | 'phone');
+        if (!client) {
+          return { success: false, error: `Cliente não encontrado: "${query}"` };
+        }
+        targetAccount = client.account;
+        clientName = client.buyer_name;
+      }
+
+      const success = await renewClient(page, targetAccount, false);
+      if (!success) {
+        return { success: false, account: targetAccount, clientName, error: 'Processo de renovação falhou no painel' };
+      }
+
+      // Atualiza só o cliente no banco (mesmo fluxo do index.ts)
+      if (process.env.DATABASE_URL) {
+        try {
+          const fresh = await searchAndExtractClient(page, targetAccount, 'account');
+          if (fresh) await updateSingleClient(fresh);
+        } catch (dbErr: any) {
+          log('warn', 'Falha ao atualizar banco pós-renew', { error: dbErr.message });
+        }
+      }
+
+      return { success: true, account: targetAccount, clientName };
+    } catch (err: any) {
+      return { success: false, error: err.message || String(err) };
+    }
+  }
+
+  // Modelo padrão (produção hoje): spawn de processo filho
   return new Promise(resolve => {
     const projectRoot = path.resolve(__dirname, '..');
     const args = ['--renew=' + query];
     if (searchBy !== 'account') args.push('--by=' + (searchBy === 'buyer_name' ? 'name' : searchBy));
 
     const child = spawn('node', ['dist/index.js', ...args], {
-      cwd: projectRoot, env: { ...process.env }, shell: true, stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: projectRoot, env: { ...process.env }, stdio: ['pipe', 'pipe', 'pipe'],
     });
 
     activeScraperPid = child.pid || null;
 
     let stderr = '';
     child.stdout.on('data', (d: Buffer) => log('info', 'renew stdout', { chunk: sanitizeLogChunk(d.toString()).slice(0, 200) }));
-    child.stderr.on('data', (d: Buffer) => { stderr = (stderr + d.toString()).slice(-5000); });
+    child.stderr.on('data', (d: Buffer) => {
+      stderr = (stderr + sanitizeLogChunk(d.toString())).slice(-5000);
+    });
 
     child.on('close', (code: number) => {
       activeScraperPid = null;
@@ -265,20 +443,37 @@ async function runRenew(query: string, searchBy: string): Promise<{ success: boo
 
 // ─── Search single client ─────────────────────────────────────────────────────
 async function runSearch(query: string, searchBy: string): Promise<{ success: boolean; data?: any; error?: string }> {
+  // Sessão persistente ativa: busca na página já logada
+  if (KEEP_OPEN) {
+    try {
+      const page = await getReadyPersistentPage();
+      const client = await searchAndExtractClient(page, query, searchBy as 'account' | 'buyer_name' | 'phone');
+      if (!client) {
+        return { success: false, error: 'Cliente não encontrado' };
+      }
+      return { success: true, data: [client] };
+    } catch (err: any) {
+      return { success: false, error: err.message || String(err) };
+    }
+  }
+
+  // Modelo padrão (produção hoje): spawn de processo filho
   return new Promise(resolve => {
     const projectRoot = path.resolve(__dirname, '..');
     const args = ['--search=' + query];
     if (searchBy !== 'account') args.push('--by=' + (searchBy === 'buyer_name' ? 'name' : searchBy));
 
     const child = spawn('node', ['dist/index.js', ...args], {
-      cwd: projectRoot, env: { ...process.env }, shell: true, stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: projectRoot, env: { ...process.env }, stdio: ['pipe', 'pipe', 'pipe'],
     });
 
     activeScraperPid = child.pid || null;
 
     let stderr = '';
     child.stdout.on('data', (d: Buffer) => log('info', 'search stdout', { chunk: sanitizeLogChunk(d.toString()).slice(0, 200) }));
-    child.stderr.on('data', (d: Buffer) => { stderr = (stderr + d.toString()).slice(-5000); });
+    child.stderr.on('data', (d: Buffer) => {
+      stderr = (stderr + sanitizeLogChunk(d.toString())).slice(-5000);
+    });
 
     child.on('close', (code: number) => {
       activeScraperPid = null;
@@ -305,6 +500,26 @@ async function runSearch(query: string, searchBy: string): Promise<{ success: bo
 app.post('/run', authenticate, async (req, res) => {
   const { action, query, searchBy } = req.body;
   log('info', 'Received /run request', { action, query, searchBy, ip: req.ip });
+
+  const validActions = new Set(['sync', 'search', 'renew']);
+  const validSearchTypes = new Set(['account', 'buyer_name', 'phone']);
+
+  if (typeof action !== 'string' || !validActions.has(action)) {
+    res.status(400).json({ error: 'Ação inválida. Use action: sync | search | renew' });
+    return;
+  }
+
+  if (searchBy !== undefined &&
+      (typeof searchBy !== 'string' || !validSearchTypes.has(searchBy))) {
+    res.status(400).json({ error: 'searchBy inválido. Use account | buyer_name | phone' });
+    return;
+  }
+
+  if ((action === 'search' || action === 'renew') &&
+      (typeof query !== 'string' || query.trim().length === 0 || query.length > 200)) {
+    res.status(400).json({ error: 'query deve ser um texto entre 1 e 200 caracteres' });
+    return;
+  }
 
   if (isScraperRunning()) {
     log('warn', 'Rejected /run — scraper already running');
@@ -362,7 +577,7 @@ app.post('/run', authenticate, async (req, res) => {
       const by = searchBy || 'account';
       try {
         addLog(`🔍 Buscando "${query}" por ${by}...`);
-        const result = await runSearch(query, by);
+        const result = await withPageLock(() => runSearch(query.trim(), by));
         job.result = sanitizeSearchResult(result);
         if (result.success && result.data) {
           const c = result.data[0];
@@ -397,7 +612,7 @@ app.post('/run', authenticate, async (req, res) => {
       const by = searchBy || 'buyer_name';
       try {
         addLog(`🔍 Buscando "${query}" por ${by}...`);
-        const result = await runRenew(query, by);
+        const result = await withPageLock(() => runRenew(query.trim(), by));
         job.result = result;
         if (result.success) {
           addLog(`✅ Renovado: ${result.clientName} | ${result.account}`);
@@ -536,5 +751,9 @@ app.listen(PORT, () => {
     `🕐 ${new Date().toLocaleString('pt-BR')}`
   ).catch(() => {});
 });
+
+// Worker da fila de renovação (renewal_jobs) — roda enquanto o servidor estiver vivo
+setInterval(pollRenewalJobs, RENEWAL_POLL_INTERVAL_MS);
+log('info', 'Renewal queue worker started', { intervalMs: RENEWAL_POLL_INTERVAL_MS });
 
 export default app;

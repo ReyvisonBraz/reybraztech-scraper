@@ -399,6 +399,9 @@ export async function searchAndExtractClient(
   console.log(`  🔎 Localizando barra de pesquisa...`);
   
   const searchInputSelectors = [
+    'input#form_item_keyword',                // painel novo: campo "Please enter" (account)
+    'input#form_item_sn_name',                // painel novo: busca por nome
+    'input#form_item_sn_telphone',            // painel novo: busca por telefone
     'input.ant-input[placeholder*="Search"]',
     'input.ant-input[placeholder*="search"]',
     'input.ant-input.ant-input-sm',
@@ -438,7 +441,6 @@ export async function searchAndExtractClient(
     'button.ant-input-search-button',
     '.ant-input-search .ant-input-search-button',
     'button:has(.anticon-search)',
-    'button:has(.anticon-search)',
     'span.ant-input-search-icon',
     'button.ant-btn-icon-only',
   ];
@@ -457,6 +459,27 @@ export async function searchAndExtractClient(
         searchClicked = true;
         break;
       }
+    }
+  }
+
+  if (!searchClicked) {
+    // Fallback: botão com texto "Search"/"Query"/"Buscar" (painel novo)
+    const textBtn = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button'));
+      for (const b of buttons) {
+        const t = (b.textContent || '').trim().toLowerCase();
+        const r = b.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) continue;
+        if (t.includes('search') || t.includes('query') || t.includes('buscar')) {
+          (b as HTMLElement).click();
+          return t;
+        }
+      }
+      return null;
+    });
+    if (textBtn) {
+      console.log(`  ✅ Botão Search clicado (texto): "${textBtn}"`);
+      searchClicked = true;
     }
   }
 

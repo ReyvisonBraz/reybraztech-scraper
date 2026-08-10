@@ -8,6 +8,96 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * Filtra a tabela pela account usando a busca nativa do painel.
+ * Isso evita percorrer páginas ou depender de a conta estar na primeira página.
+ */
+async function filterTableByAccount(page: Page, account: string): Promise<boolean> {
+  const searchInputSelectors = [
+    'input#form_item_keyword',                // painel novo: campo "Please enter" (account)
+    'input.ant-input[placeholder*="Search"]',
+    'input.ant-input[placeholder*="search"]',
+    '.ant-input-search input',
+    'input[placeholder*="Search"]',
+    'input[type="search"]',
+  ];
+
+  let searchInput = null;
+  for (const selector of searchInputSelectors) {
+    const candidate = await page.$(selector);
+    if (!candidate) continue;
+
+    const visible = await candidate.evaluate((el: Element) => {
+      const style = window.getComputedStyle(el);
+      return style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        (el as HTMLInputElement).offsetParent !== null;
+    });
+
+    if (visible) {
+      searchInput = candidate;
+      break;
+    }
+  }
+
+  if (!searchInput) {
+    console.log('  ⚠️  Busca nativa não encontrada; verificando tabela carregada.');
+    return false;
+  }
+
+  await searchInput.click({ clickCount: 3 });
+  await page.keyboard.press('Backspace');
+  await searchInput.type(account, { delay: 20 });
+
+  const searchButtonSelectors = [
+    'button.ant-input-search-button',
+    '.ant-input-search .ant-input-search-button',
+    'span.ant-input-search-icon',
+  ];
+
+  let submitted = false;
+  for (const selector of searchButtonSelectors) {
+    const button = await page.$(selector);
+    if (!button) continue;
+    const visible = await button.evaluate((el: Element) => {
+      const style = window.getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden';
+    });
+    if (visible) {
+      await button.click();
+      submitted = true;
+      break;
+    }
+  }
+
+  if (!submitted) {
+    // Fallback: botão com texto "Search"/"Query"/"Buscar" (painel novo)
+    const textBtn = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button'));
+      for (const b of buttons) {
+        const t = (b.textContent || '').trim().toLowerCase();
+        const r = b.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) continue;
+        if (t.includes('search') || t.includes('query') || t.includes('buscar')) {
+          (b as HTMLElement).click();
+          return t;
+        }
+      }
+      return null;
+    });
+    if (textBtn) {
+      submitted = true;
+    }
+  }
+
+  if (!submitted) {
+    await page.keyboard.press('Enter');
+  }
+
+  await delay(1500);
+  return true;
+}
+
+/**
  * Seleciona uma opção em um dropdown Ant Design Select dentro de um container.
  *
  * Por que usa page.evaluate em vez de ElementHandle.click()?
@@ -91,6 +181,7 @@ const MAX_RENEW_RETRIES = 2;
  * 8. Clica OK no popup de confirmação
  */
 export async function renewClient(page: Page, account: string, dryRun: boolean = false): Promise<boolean> {
+  const renewalStartedAt = Date.now();
   console.log(`\n🔄 Iniciando renovação do cliente: ${account}`);
 
   const outputDir = path.join(__dirname, '..', 'output');
@@ -102,7 +193,8 @@ export async function renewClient(page: Page, account: string, dryRun: boolean =
     try {
       const result = await attemptRenewal(page, account, outputDir, attempt, dryRun);
       if (result.success) {
-        console.log(`  🎉 Renovação de "${account}" concluída com sucesso!`);
+        const durationSeconds = ((Date.now() - renewalStartedAt) / 1000).toFixed(1);
+        console.log(`  🎉 Renovação de "${account}" concluída em ${durationSeconds}s!`);
         return true;
       }
       console.log(`  ⚠️  Falhou na tentativa ${attempt}: ${result.error}`);
@@ -146,7 +238,13 @@ async function attemptRenewal(
   await page.waitForSelector('.ant-table-row, .el-table__row, tr.ant-table-row', { timeout: 30000 }).catch(() => {
     step('⚠️  Tabela não carregou em 30s');
   });
-  await delay(1500);
+
+  const searchStartedAt = Date.now();
+  const filtered = await filterTableByAccount(page, account);
+  if (filtered) {
+    step(`⚡ Filtro direto aplicado em ${Date.now() - searchStartedAt}ms`);
+  }
+  await delay(500);
 
   // 2. Encontra a linha do cliente
   step('🔍 Procurando conta na tabela...');

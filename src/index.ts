@@ -154,31 +154,50 @@ export async function runScraper() {
         } else {
           console.log(`\n✅ Renovação concluída: ${clientName} (${targetAccount})`);
 
-          // Notifica renovação concluída
-          notifyRenewComplete(clientName, targetAccount, 0).catch(() => {});
-
-          // Busca dados frescos do cliente e atualiza só ele no banco
+          // Busca dados frescos do cliente (com retry — a tabela pode estar recarregando)
+          let freshClient = null;
           if (process.env.DATABASE_URL) {
-            try {
-              console.log(`\n💾 Atualizando ${targetAccount} no banco...`);
-              const freshClient = await searchAndExtractClient(session.page, targetAccount, 'account');
-              if (freshClient) {
-                await updateSingleClient(freshClient);
-                fs.writeFileSync(outputPath, JSON.stringify({
-                  success: true,
-                  account: targetAccount,
-                  clientName: freshClient.buyer_name || clientName,
-                  days_remaining: freshClient.days_remaining,
-                }, null, 2));
-              } else {
-                fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: targetAccount, clientName }, null, 2));
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                console.log(`\n💾 Atualizando ${targetAccount} no banco... (tentativa ${attempt}/3)`);
+                await new Promise(r => setTimeout(r, attempt === 1 ? 3000 : 4000));
+                // Força recarga da SPA para resetar o filtro anterior e a tabela.
+                // page.reload() (e não goto) porque a URL já pode ser #/account/list.
+                await session.page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+                await new Promise(r => setTimeout(r, 2500));
+                freshClient = await searchAndExtractClient(session.page, targetAccount, 'account');
+                if (freshClient) break;
+                console.log(`   ⚠️  Busca pós-renew voltou vazia (tentativa ${attempt}), tentando de novo...`);
+              } catch (searchErr: any) {
+                console.log(`   ⚠️  Erro na busca pós-renew: ${searchErr.message}`);
               }
+            }
+          }
+
+          const daysNow = freshClient?.days_remaining ?? 0;
+
+          // Notifica com os dias reais (não mais 0 fixo)
+          notifyRenewComplete(clientName, targetAccount, daysNow).catch(() => {});
+
+          // Atualiza só o cliente no banco
+          if (process.env.DATABASE_URL && freshClient) {
+            try {
+              await updateSingleClient(freshClient);
+              fs.writeFileSync(outputPath, JSON.stringify({
+                success: true,
+                account: targetAccount,
+                clientName: freshClient.buyer_name || clientName,
+                days_remaining: freshClient.days_remaining,
+              }, null, 2));
             } catch (dbErr: any) {
               console.error(`   ⚠️  Erro ao atualizar banco pós-renew: ${dbErr.message}`);
-              fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: targetAccount, clientName }, null, 2));
+              fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: targetAccount, clientName, days_remaining: daysNow }, null, 2));
             }
+          } else if (process.env.DATABASE_URL) {
+            console.error(`   ⚠️  Não foi possível obter dados frescos de ${targetAccount} após o renew.`);
+            fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: targetAccount, clientName, days_remaining: 0 }, null, 2));
           } else {
-            fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: targetAccount, clientName }, null, 2));
+            fs.writeFileSync(outputPath, JSON.stringify({ success: true, account: targetAccount, clientName, days_remaining: daysNow }, null, 2));
           }
         }
       } else {
@@ -195,7 +214,7 @@ export async function runScraper() {
         console.log(`\n✅ Cliente encontrado!`);
         console.log(`   Account: ${client.account}`);
         console.log(`   Nome: ${client.buyer_name}`);
-        console.log(`   Senha: ${client.password}`);
+        console.log(`   Senha: [redacted]`);
         console.log(`   Pacote: ${client.package_name}`);
         console.log(`   Dias restantes: ${client.days_remaining}`);
         console.log(`   Status: ${client.in_use}`);
