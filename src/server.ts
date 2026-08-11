@@ -728,12 +728,15 @@ app.post('/2fa', authenticate, (req, res) => {
   if (!/^\d{6}$/.test(normalizedCode)) {
     res.status(400).json({ error: 'Código 2FA deve conter exatamente 6 dígitos' }); return;
   }
+  if (!sessionId || typeof sessionId !== 'string') {
+    res.status(409).json({ error: 'Sessão 2FA ausente. Recarregue o prompt.' }); return;
+  }
   const result = deliver2FACode(normalizedCode, { sessionId });
   if (result.ok) {
     log('info', '2FA code delivered to scraper', { status: result.status });
     res.json({ ok: true, message: 'Código 2FA recebido. Scraper retomando...', state: result.status });
   } else {
-    // none / consumed / accepted / rejected — fora da janela ou duplicado
+    // none / consumed / accepted / rejected / sessão divergente — fora da janela ou duplicado
     res.status(409).json({ error: result.error, state: result.status });
   }
 });

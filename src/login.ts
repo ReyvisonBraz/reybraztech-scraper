@@ -325,7 +325,53 @@ async function handle2FA(page: Page, sessionId: string): Promise<'not-required' 
     return 'failed';
   }
 
+  // Em um desafio renderizado como modal sobre uma rota autenticada, a URL não
+  // prova nada. Exige que o desafio realmente tenha sumido: nenhum input de
+  // código 2FA visível. Se ainda houver, o código foi recusado ou o modal segue
+  // aberto — trata como falha para não persistir cookies de sessão pendente.
+  const challengeCleared = await waitForChallengeToClear(page, 8000);
+  if (!challengeCleared) {
+    console.log('  ❌ Modal/input de 2FA ainda visível após confirmar o código — código recusado ou pendente.');
+    return 'failed';
+  }
+
   return 'completed';
+}
+
+/**
+ * Espera o desafio 2FA desaparecer da página (modal/input fechados).
+ * Retorna true se não houver mais elemento 2FA visível dentro do prazo.
+ */
+async function waitForChallengeToClear(page: Page, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const visible2FA = await page.evaluate(() => {
+      const isVisible = (el: Element) => {
+        const s = window.getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden' && el.getBoundingClientRect().height > 0;
+      };
+      // Input de código 2FA visível (modal ou tela de segurança)
+      const inputs = Array.from(document.querySelectorAll('input[type="text"], input'));
+      for (const input of inputs) {
+        const ph = (input.getAttribute('placeholder') || '').toLowerCase();
+        if (isVisible(input) && (ph.includes('code') || ph.includes('código') || ph.includes('verif'))) {
+          return true;
+        }
+      }
+      // Diálogo/modal ainda aberto
+      const dialogs = Array.from(document.querySelectorAll('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal'));
+      for (const d of dialogs) {
+        if (isVisible(d)) {
+          const txt = (d.textContent || '').toLowerCase();
+          if (txt.includes('code') || txt.includes('código') || txt.includes('verif')) return true;
+        }
+      }
+      return false;
+    });
+    if (!visible2FA) return true;
+    await delay(500);
+  }
+  return false;
 }
 
 /**

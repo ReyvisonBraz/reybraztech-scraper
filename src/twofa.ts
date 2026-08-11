@@ -24,6 +24,10 @@ const CODE_FILE    = path.join(OUTPUT_DIR, '2fa_code.txt');
 /** TTL padrão de uma tentativa de 2FA (5 min) */
 export const DEFAULT_2FA_TTL_MS = 300000;
 
+/** Quanto tempo o estado terminal (consumed/accepted/rejected) fica observável
+ * após o fim da espera, antes de voltar a `none`. */
+export const TERMINAL_RETENTION_MS = 15000;
+
 export type TwoFAState =
   | 'none'       // sem tentativa ativa
   | 'waiting'    // aguardando código
@@ -115,39 +119,41 @@ export function get2FAStatus(expectedSessionId?: string): {
   state: TwoFAState;
   sessionId: string | null;
   remainingMs: number;
+  matches: boolean;
 } {
   // Prioridade: estado em memória (modo compartilhado)
   if (activeWait) {
     const remainingMs = activeWait.expiresAt - now();
     if (remainingMs <= 0) {
       activeWait = null;
-      return { state: 'none', sessionId: null, remainingMs: 0 };
+      return { state: 'none', sessionId: null, remainingMs: 0, matches: true };
     }
     if (expectedSessionId && activeWait.sessionId !== expectedSessionId) {
-      return { state: 'none', sessionId: null, remainingMs: 0 };
+      // Existe uma sessão ativa, mas pertence a outra tentativa.
+      return { state: activeWait.state, sessionId: activeWait.sessionId, remainingMs, matches: false };
     }
-    return { state: activeWait.state, sessionId: activeWait.sessionId, remainingMs };
+    return { state: activeWait.state, sessionId: activeWait.sessionId, remainingMs, matches: true };
   }
 
   // Fallback: arquivo (modo filho)
   if (fs.existsSync(WAITING_FILE)) {
     try {
       const raw = JSON.parse(fs.readFileSync(WAITING_FILE, 'utf-8')) as Partial<WaitingPayload>;
-      if (typeof raw.expiresAt === 'number' && now() > raw.expiresAt) {
+      const remainingMs = typeof raw.expiresAt === 'number' ? raw.expiresAt - now() : 0;
+      if (remainingMs <= 0) {
         clear2FAFiles();
-        return { state: 'none', sessionId: null, remainingMs: 0 };
+        return { state: 'none', sessionId: null, remainingMs: 0, matches: true };
       }
       const sessionId = raw.sessionId ?? null;
       if (expectedSessionId && sessionId !== expectedSessionId) {
-        return { state: 'none', sessionId: null, remainingMs: 0 };
+        return { state: raw.state ?? 'waiting', sessionId, remainingMs, matches: false };
       }
-      const remainingMs = typeof raw.expiresAt === 'number' ? raw.expiresAt - now() : 0;
-      return { state: raw.state ?? 'waiting', sessionId, remainingMs };
+      return { state: raw.state ?? 'waiting', sessionId, remainingMs, matches: true };
     } catch {
-      return { state: 'none', sessionId: null, remainingMs: 0 };
+      return { state: 'none', sessionId: null, remainingMs: 0, matches: true };
     }
   }
-  return { state: 'none', sessionId: null, remainingMs: 0 };
+  return { state: 'none', sessionId: null, remainingMs: 0, matches: true };
 }
 
 /** Verifica se há espera ativa para o sessionId dado. */
@@ -184,6 +190,9 @@ export function deliver2FACode(
 
   if (status.state === 'none') {
     return { ok: false, status: 'none', error: 'Nenhuma sessão 2FA aguardando código no momento.' };
+  }
+  if (!status.matches) {
+    return { ok: false, status: status.state, error: 'Sessão 2FA divergente: o código pertence a outra tentativa.' };
   }
   if (status.state !== 'waiting') {
     return { ok: false, status: status.state, error: `Sessão 2FA já ${status.state === 'consumed' ? 'recebeu um código' : 'finalizada'}.` };
@@ -272,13 +281,25 @@ export async function waitFor2FACode(
 
     const code = await Promise.race([inMemory, fromFile]);
 
-    // Encerra a tentativa em memória e remove arquivos.
+    // Fim da espera: marca o estado e mantém o registro por um curto TTL para
+    // que accepted/rejected (definidos por loginToPanel) fiquem observáveis.
     aborted = true;
-    activeWait = null;
-    clear2FAFiles();
+    if (activeWait && activeWait.sessionId === sessionId) {
+      activeWait.resolve = undefined;
+      if (code) {
+        activeWait.state = 'consumed';
+        activeWait.expiresAt = now() + TERMINAL_RETENTION_MS;
+      } else {
+        activeWait.state = 'rejected';
+        activeWait.expiresAt = now() + TERMINAL_RETENTION_MS;
+      }
+    }
+    // No modo filho, persiste o estado terminal no arquivo para o pai ler.
+    if (fs.existsSync(WAITING_FILE)) {
+      set2FAState(sessionId, code ? 'consumed' : 'rejected');
+    }
 
     if (code) {
-      set2FAState(sessionId, 'consumed');
       console.log(`  ✅ ${label} recebido: "${code}"`);
       return code;
     }
