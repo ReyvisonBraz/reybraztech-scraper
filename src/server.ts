@@ -40,6 +40,11 @@ function sanitizeLogChunk(text: string): string {
     .replace(/(Password:\s*)[^\r\n]+/gi, '$1[redacted]');
 }
 
+// Remove códigos ANSI/cor antes de expor o stdout do filho como log de progresso.
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
 function sanitizeSearchResult(result: { success: boolean; data?: any; error?: string }) {
   if (!result.data) return result;
   return {
@@ -80,19 +85,34 @@ function authenticate(req: express.Request, res: express.Response, next: express
 }
 
 // ─── Concurrency Lock ─────────────────────────────────────────────────────────
-let activeScraperPid: number | null = null;
+// Usamos a referência do ChildProcess (e não o PID cru) para o lock: `kill(pid,0)`
+// pode dar falso-positivo se o SO reciclar o PID para outro processo, travando o
+// scraper "em execução" para sempre. Com a referência do child, o estado real é
+// lido via `exitCode === null` (ainda vivo) - livre de reuso de PID.
+let activeChild: import('child_process').ChildProcess | null = null;
 let pageBusy = false;
+
+interface ActiveOp { op: string; startedAt: string; query?: string; }
+let activeOp: ActiveOp | null = null;
+
+function beginOp(op: Omit<ActiveOp, 'startedAt'>): void {
+  activeOp = { ...op, startedAt: new Date().toISOString() };
+}
+function endOp(): void {
+  activeOp = null;
+}
+function currentOpLabel(): string {
+  return activeOp ? `${activeOp.op}${activeOp.query ? ` (${activeOp.query})` : ''} desde ${new Date(activeOp.startedAt).toLocaleTimeString('pt-BR')}` : 'nenhuma operação';
+}
 
 function isScraperRunning(): boolean {
   if (pageBusy) return true;
-  if (activeScraperPid === null) return false;
-  try {
-    process.kill(activeScraperPid, 0);
-    return true;
-  } catch {
-    activeScraperPid = null;
+  if (activeChild) {
+    if (activeChild.exitCode === null) return true; // processo filho ainda vivo
+    activeChild = null;
     return false;
   }
+  return false;
 }
 
 /**
@@ -110,6 +130,17 @@ async function withPageLock<T>(fn: () => Promise<T>): Promise<T> {
     return await fn();
   } finally {
     pageBusy = false;
+  }
+}
+
+// Similar ao withPageLock, mas registra a operação em andamento para dar
+// visibilidade no /health e na mensagem de 409 (evita o "travado à toa").
+async function withOp<T>(info: Omit<ActiveOp, 'startedAt'>, fn: () => Promise<T>): Promise<T> {
+  beginOp(info);
+  try {
+    return await fn();
+  } finally {
+    endOp();
   }
 }
 
@@ -197,7 +228,7 @@ async function pollRenewalJobs(): Promise<void> {
 
     let result: { success: boolean; account?: string; clientName?: string; error?: string };
     try {
-      result = await withPageLock(() => runRenew(job.starhome_account, 'account'));
+      result = await withOp({ op: 'queue-renew', query: job.starhome_account }, () => withPageLock(() => runRenew(job.starhome_account, 'account')));
     } catch (err: any) {
       result = { success: false, error: err.message || String(err) };
     }
@@ -297,7 +328,7 @@ function updateJob(job: Job): void {
 }
 
 // ─── Run full scraper ─────────────────────────────────────────────────────────
-async function runScraper(): Promise<{ success: boolean; clients: number; stats?: any; error?: string }> {
+async function runScraper(onProgress?: (chunk: string) => void): Promise<{ success: boolean; clients: number; stats?: any; error?: string }> {
   return new Promise(resolve => {
     // In dev: __dirname = scraper/dist, projectRoot = scraper
     // In prod: __dirname = scraper/dist, projectRoot = scraper
@@ -308,13 +339,14 @@ async function runScraper(): Promise<{ success: boolean; clients: number; stats?
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    activeScraperPid = child.pid || null;
+    activeChild = child;
 
     let stderr = '';
 
     child.stdout.on('data', (d: Buffer) => {
       const t = d.toString();
       log('info', 'scraper stdout', { chunk: sanitizeLogChunk(t).slice(0, 200) });
+      if (onProgress) onProgress(t);
     });
     child.stderr.on('data', (d: Buffer) => {
       const t = sanitizeLogChunk(d.toString());
@@ -323,17 +355,19 @@ async function runScraper(): Promise<{ success: boolean; clients: number; stats?
     });
 
     child.on('close', async (code: number) => {
-      activeScraperPid = null;
+      activeChild = null;
       if (code !== 0) {
         log('error', 'Scraper process exited with non-zero code', { code, stderr: stderr.slice(-500) });
         resolve({ success: false, clients: 0, error: stderr.slice(-500) });
         return;
       }
       try {
-        const jsonPath = path.join(__dirname, '..', 'output', 'clients_extracted.json');
+        // O script (exportAll) grava em output/clients.json. Antes lia
+        // clients_extracted.json (nunca escrito) e o sync sempre reportava 0.
+        const jsonPath = path.join(__dirname, '..', 'output', 'clients.json');
         if (fs.existsSync(jsonPath)) {
           const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-          const list = data.clients || [];
+          const list = Array.isArray(data) ? data : (data.clients || []);
           resolve({
             success: true, clients: list.length,
             stats: {
@@ -354,7 +388,7 @@ async function runScraper(): Promise<{ success: boolean; clients: number; stats?
     });
 
     child.on('error', (e: Error) => {
-      activeScraperPid = null;
+      activeChild = null;
       log('error', 'Scraper spawn error', { error: e.message });
       resolve({ success: false, clients: 0, error: e.message });
     });
@@ -410,7 +444,7 @@ async function runRenew(query: string, searchBy: string): Promise<{ success: boo
       cwd: projectRoot, env: { ...process.env }, stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    activeScraperPid = child.pid || null;
+    activeChild = child;
 
     let stderr = '';
     child.stdout.on('data', (d: Buffer) => log('info', 'renew stdout', { chunk: sanitizeLogChunk(d.toString()).slice(0, 200) }));
@@ -419,7 +453,7 @@ async function runRenew(query: string, searchBy: string): Promise<{ success: boo
     });
 
     child.on('close', (code: number) => {
-      activeScraperPid = null;
+      activeChild = null;
       if (code !== 0) { resolve({ success: false, error: stderr.slice(-500) }); return; }
       try {
         const jsonPath = path.join(__dirname, '..', 'output', 'renew_result.json');
@@ -435,7 +469,7 @@ async function runRenew(query: string, searchBy: string): Promise<{ success: boo
     });
 
     child.on('error', (e: Error) => {
-      activeScraperPid = null;
+      activeChild = null;
       resolve({ success: false, error: e.message });
     });
   });
@@ -467,7 +501,7 @@ async function runSearch(query: string, searchBy: string): Promise<{ success: bo
       cwd: projectRoot, env: { ...process.env }, stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    activeScraperPid = child.pid || null;
+    activeChild = child;
 
     let stderr = '';
     child.stdout.on('data', (d: Buffer) => log('info', 'search stdout', { chunk: sanitizeLogChunk(d.toString()).slice(0, 200) }));
@@ -476,7 +510,7 @@ async function runSearch(query: string, searchBy: string): Promise<{ success: bo
     });
 
     child.on('close', (code: number) => {
-      activeScraperPid = null;
+      activeChild = null;
       if (code !== 0) { resolve({ success: false, error: stderr.slice(-500) }); return; }
       try {
         const jsonPath = path.join(__dirname, '..', 'output', 'client_search.json');
@@ -490,7 +524,7 @@ async function runSearch(query: string, searchBy: string): Promise<{ success: bo
     });
 
     child.on('error', (e: Error) => {
-      activeScraperPid = null;
+      activeChild = null;
       resolve({ success: false, error: e.message });
     });
   });
@@ -522,8 +556,8 @@ app.post('/run', authenticate, async (req, res) => {
   }
 
   if (isScraperRunning()) {
-    log('warn', 'Rejected /run — scraper already running');
-    res.status(409).json({ error: 'Scraper já está em execução. Aguarde a conclusão.' });
+    log('warn', 'Rejected /run — scraper already running', { op: activeOp });
+    res.status(409).json({ error: `Scraper ocupado (${currentOpLabel()}). Aguarde a conclusão.` });
     return;
   }
 
@@ -541,7 +575,14 @@ app.post('/run', authenticate, async (req, res) => {
       try {
         addLog('🔄 Iniciando scraper...');
         await sendTelegram('🔄 <b>Scraper iniciado!</b>\n\nExecutando sincronização completa...');
-        const result = await runScraper();
+        const result = await withOp({ op: 'sync' }, () => runScraper((chunk) => {
+          // Streama o progresso do processo filho para o job (feedback ao vivo).
+          const lines = stripAnsi(chunk)
+            .split('\n')
+            .map((l) => l.trim())
+            .filter((l) => l.length > 0 && !l.startsWith('[') && !l.startsWith('{'));
+          for (const line of lines) addLog(line);
+        }));
         job.result = result;
 
         if (result.success && result.stats) {
@@ -577,7 +618,7 @@ app.post('/run', authenticate, async (req, res) => {
       const by = searchBy || 'account';
       try {
         addLog(`🔍 Buscando "${query}" por ${by}...`);
-        const result = await withPageLock(() => runSearch(query.trim(), by));
+        const result = await withOp({ op: 'search', query }, () => withPageLock(() => runSearch(query.trim(), by)));
         job.result = sanitizeSearchResult(result);
         if (result.success && result.data) {
           const c = result.data[0];
@@ -610,9 +651,12 @@ app.post('/run', authenticate, async (req, res) => {
     ;(async () => {
       const addLog = (m: string) => { job.logs.push(m); updateJob(job); };
       const by = searchBy || 'buyer_name';
+      // Heartbeat: como a renovação usa a sessão persistente (sem stdout a
+      // streamar), emitimos um progresso periódico para a tela não ficar muda.
+      const heartbeat = setInterval(() => addLog(`⏳ Ainda renovando "${query}"...`), 15000);
       try {
         addLog(`🔍 Buscando "${query}" por ${by}...`);
-        const result = await withPageLock(() => runRenew(query.trim(), by));
+        const result = await withOp({ op: 'renew', query }, () => withPageLock(() => runRenew(query.trim(), by)));
         job.result = result;
         if (result.success) {
           addLog(`✅ Renovado: ${result.clientName} | ${result.account}`);
@@ -626,6 +670,8 @@ app.post('/run', authenticate, async (req, res) => {
       } catch (err: any) {
         job.status = 'error';
         job.result = { success: false, error: err.message };
+      } finally {
+        clearInterval(heartbeat);
       }
       job.finishedAt = new Date().toISOString();
       updateJob(job);
@@ -684,6 +730,7 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     timestamp: new Date().toISOString(),
     scraperRunning: isScraperRunning(),
+    activeOp: activeOp ? { ...activeOp } : null,
     uptime: process.uptime(),
   });
 });
@@ -726,16 +773,16 @@ app.use((err: Error, req: express.Request, res: express.Response, _next: express
 // ─── Graceful Shutdown ────────────────────────────────────────────────────────
 process.on('SIGTERM', () => {
   log('info', 'SIGTERM received — shutting down gracefully');
-  if (activeScraperPid) {
-    try { process.kill(activeScraperPid, 'SIGTERM'); } catch {}
+  if (activeChild) {
+    try { activeChild.kill('SIGTERM'); } catch {}
   }
   process.exit(0);
 });
 
 process.on('SIGINT', () => {
   log('info', 'SIGINT received — shutting down gracefully');
-  if (activeScraperPid) {
-    try { process.kill(activeScraperPid, 'SIGINT'); } catch {}
+  if (activeChild) {
+    try { activeChild.kill('SIGINT'); } catch {}
   }
   process.exit(0);
 });

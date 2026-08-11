@@ -26,8 +26,9 @@ function getDb() {
   if (!connectionString) {
     throw new Error('❌ DATABASE_URL não definido no .env (necessário para --sync)');
   }
+  const useSsl = process.env.DATABASE_SSL !== 'false';
   _sql = postgres(connectionString, {
-    ssl: 'require',
+    ssl: useSsl ? 'require' : false,
     max: 10,
     idle_timeout: 20,
     prepare: false,
