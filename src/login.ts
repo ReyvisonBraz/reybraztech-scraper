@@ -276,7 +276,7 @@ async function handle2FA(page: Page, sessionId: string): Promise<'not-required' 
     if (input) {
       await input.click({ clickCount: 3 });
       await input.type(code);
-      await mark2FAChallengeInput(page, selector);
+      await mark2FAChallengeInput(page, input);
       codeInserted = true;
       break;
     }
@@ -290,7 +290,7 @@ async function handle2FA(page: Page, sessionId: string): Promise<'not-required' 
       if (ph.toLowerCase().includes('code') || ph.toLowerCase().includes('código')) {
         await input.click({ clickCount: 3 });
         await input.type(code);
-        await mark2FAChallengeInput(page, null);
+        await mark2FAChallengeInput(page, input);
         codeInserted = true;
         break;
       }
@@ -341,50 +341,50 @@ async function handle2FA(page: Page, sessionId: string): Promise<'not-required' 
 }
 
 /**
- * Marca o elemento do desafio 2FA (o input de código e seu modal/container
- * mais próximo) com um atributo temporário. Isso permite, após Confirm, esperar
- * que ELE desapareça, sem depender de idioma (chinês/inglês) nem varrer a
- * página inteira por texto.
+ * Marca o elemento exato do desafio 2FA (o input de código usado e seu
+ * modal/container mais próximo) com um atributo temporário. Recebe o próprio
+ * handle do input para nunca acompanhar o elemento errado (fallback) nem
+ * depender de idioma (chinês/inglês) ou de varrer a página por texto.
  */
-async function mark2FAChallengeInput(page: Page, selector: string | null): Promise<void> {
+async function mark2FAChallengeInput(page: Page, input: any): Promise<void> {
   const marker = 'data-traycer-2fa';
-  await page.evaluate((markerName) => {
-    const mark = (el: Element | null) => { if (el) el.setAttribute(markerName, '1'); };
-    // Marca o input de código usado.
-    if (selector) mark(document.querySelector(selector));
-    else {
-      // Fallback: marca o último input de texto visível (o que acabamos de usar).
-      const inputs = Array.from(document.querySelectorAll('input[type="text"]'));
-      for (let i = inputs.length - 1; i >= 0; i--) {
-        if (inputs[i].getBoundingClientRect().height > 0) { mark(inputs[i]); break; }
-      }
-    }
-    // Marca o diálogo/modal mais próximo do input marcado.
-    const markedInput = document.querySelector(`[${markerName}]`);
-    if (markedInput) {
-      const dialog = markedInput.closest('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal');
-      if (dialog) mark(dialog);
-    }
+  await input.evaluate((el: Element, markerName: string) => {
+    el.setAttribute(markerName, '1');
+    const dialog = el.closest('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal');
+    if (dialog) dialog.setAttribute(markerName, '1');
   }, marker);
 }
 
 /**
- * Espera o desafio 2FA desaparecer. Retorna true quando nenhum elemento marcado
- * como `data-traycer-2fa` (input/modal) está visível ou ainda no DOM.
+ * Espera o desafio 2FA desaparecer. Retorna true quando:
+ *  - nenhum elemento marcado com `data-traycer-2fa` está visível; e
+ *  - nenhum diálogo/modal visível ainda contém um input (cobre o caso de o
+ *    framework remontar o modal após código recusado, perdendo o marcador).
+ * A checagem estrutural é restrita a diálogos, para não disparar falso
+ * negativo em um campo comum chamado "code" na rota autenticada.
  */
 async function waitForChallengeToClear(page: Page, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const stillVisible = await page.evaluate(() => {
+    const stillBlocked = await page.evaluate(() => {
       const isVisible = (el: Element) => {
         const s = window.getComputedStyle(el);
         return s.display !== 'none' && s.visibility !== 'hidden'
           && el.getBoundingClientRect().height > 0 && el.getBoundingClientRect().width > 0;
       };
+      // 1) Elemento marcado ainda visível (input/modal do desafio).
       const marked = Array.from(document.querySelectorAll('[data-traycer-2fa]'));
-      return marked.some(isVisible);
+      if (marked.some(isVisible)) return true;
+      // 2) Desafio remontado: diálogo visível que ainda contém input.
+      const dialogs = Array.from(document.querySelectorAll('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal'));
+      for (const d of dialogs) {
+        if (!isVisible(d)) continue;
+        const hasInput = Array.from(d.querySelectorAll('input')).some(isVisible);
+        if (hasInput) return true;
+      }
+      return false;
     });
-    if (!stillVisible) return true;
+    if (!stillBlocked) return true;
     await delay(500);
   }
   return false;
