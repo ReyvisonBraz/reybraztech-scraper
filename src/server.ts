@@ -715,7 +715,11 @@ app.post('/2fa', authenticate, (req, res) => {
   if (!code || typeof code !== 'string') {
     res.status(400).json({ error: 'Código 2FA é obrigatório' }); return;
   }
-  const ok = deliver2FACode(code.trim());
+  const normalizedCode = code.trim();
+  if (!/^\d{6}$/.test(normalizedCode)) {
+    res.status(400).json({ error: 'Código 2FA deve conter exatamente 6 dígitos' }); return;
+  }
+  const ok = deliver2FACode(normalizedCode);
   if (ok) {
     log('info', '2FA code delivered to scraper');
     res.json({ ok: true, message: 'Código 2FA recebido. Scraper retomando...' });

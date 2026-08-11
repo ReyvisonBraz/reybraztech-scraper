@@ -26,6 +26,54 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function normalizeUiText(text: string): string {
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+}
+
+function isSendCodeLabel(text: string): boolean {
+  const normalized = normalizeUiText(text);
+  return normalized.includes('send')
+    || normalized.includes('enviar')
+    || normalized.includes('get code')
+    || normalized.includes('obter codigo')
+    || normalized.includes('发送')
+    || normalized.includes('获取验证码');
+}
+
+async function waitForCodeDispatchFeedback(page: Page): Promise<boolean> {
+  try {
+    await page.waitForFunction(() => {
+      const selectors = [
+        '.el-message',
+        '.el-notification',
+        '.ant-message',
+        '.ant-notification',
+        '[role="alert"]',
+      ];
+      const text = selectors
+        .flatMap(selector => Array.from(document.querySelectorAll(selector)))
+        .map(element => element.textContent || '')
+        .join(' ')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+
+      return text.includes('sent')
+        || text.includes('enviado')
+        || text.includes('enviada')
+        || text.includes('success')
+        || text.includes('sucesso');
+    }, { timeout: 6000, polling: 250 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 
 /**
  * Salva os cookies da sessão atual para reusar depois (evita 2FA repetido).
@@ -70,7 +118,7 @@ async function handle2FA(page: Page): Promise<boolean> {
   const detectButtons = await page.$$('button, span.text-primary, a.text-primary');
   for (const btn of detectButtons) {
     const text = await btn.evaluate((el: Element) => el.textContent || '');
-    if (text.includes('Send') || text.includes('Enviar') || text.includes('Get code')) {
+    if (isSendCodeLabel(text)) {
       const isVisible = await btn.evaluate((el) => {
         const style = window.getComputedStyle(el);
         return style.display !== 'none' && style.visibility !== 'hidden' && el.getBoundingClientRect().height > 0;
@@ -153,37 +201,55 @@ async function handle2FA(page: Page): Promise<boolean> {
   const allButtons = await page.$$('button, span.text-primary, a.text-primary');
   for (const btn of allButtons) {
     const text = await btn.evaluate((el: Element) => el.textContent || '');
-    if (text.includes('Send') || text.includes('Enviar') || text.includes('Get code')) {
-      const isVisible = await btn.evaluate((el: any) => {
+    if (isSendCodeLabel(text)) {
+      const isClickable = await btn.evaluate((el: any) => {
         const s = window.getComputedStyle(el);
-        return s.display !== 'none' && s.visibility !== 'hidden' && el.getBoundingClientRect().height > 0;
+        const clickable = el.closest('button, a') || el;
+        return s.display !== 'none'
+          && s.visibility !== 'hidden'
+          && el.getBoundingClientRect().height > 0
+          && !clickable.disabled
+          && clickable.getAttribute('aria-disabled') !== 'true';
       });
-      if (isVisible) {
-        await (btn as any).click();
-        console.log('  📤 Botão "Send" clicado — E-mail sendo enviado pelo painel...');
+      if (isClickable) {
+        await btn.evaluate((el: any) => {
+          const clickable = el.closest('button, a') || el;
+          clickable.scrollIntoView({ block: 'center', inline: 'center' });
+          clickable.click();
+        });
+        console.log('  📤 Clique no botão de envio do código acionado.');
         sendClicked = true;
-        await new Promise(r => setTimeout(r, 1500));
         break;
       }
     }
   }
 
   if (!sendClicked) {
-    console.log('  ⚠️  Botão "Send" não encontrado — o painel pode já ter enviado o código.');
+    console.log('  ❌ Botão de envio do código não foi encontrado ou estava desabilitado.');
+    await sendTelegramMessage(
+      '❌ <b>Não foi possível solicitar o código 2FA.</b>\n\n' +
+      'O botão de envio do StarHome não foi encontrado ou estava desabilitado. O job será encerrado sem afirmar que o e-mail foi enviado.'
+    ).catch(() => {});
+    return false;
   }
 
-  // PASSO 3: Notifica pelo Telegram (aviso apenas, não espera resposta)
-  const { waitForTelegramReply } = await import('./telegram');
+  const dispatchConfirmed = await waitForCodeDispatchFeedback(page);
+  console.log(dispatchConfirmed
+    ? '  ✅ O painel exibiu uma confirmação após solicitar o código.'
+    : '  ⚠️ Clique acionado, mas o painel não exibiu confirmação verificável de envio.');
 
+  // PASSO 3: Notifica pelo Telegram. O código deve ser entregue pelo Console Admin.
   await sendTelegramMessage(
     '🔐 <b>Código 2FA (E-mail) necessário!</b>\n\n' +
     'O painel StarHome detectou um novo dispositivo.\n' +
-    '📧 O e-mail com o código de acesso já foi disparado pelo painel.\n\n' +
-    '➡️ <b>Por favor, digite o código de 6 dígitos que recebeu no e-mail aqui.</b>'
+    (dispatchConfirmed
+      ? '📧 O painel confirmou a solicitação do código por e-mail.\n\n'
+      : '⚠️ O clique de envio foi acionado, mas o painel não mostrou confirmação. Confira também Spam e Promoções.\n\n') +
+    '➡️ <b>Digite o código de 6 dígitos no campo amarelo do Console Admin.</b>'
   ).catch(() => {});
 
-  // Aguarda 2FA pelo Telegram diretamente (ou terminal se não configurado)
-  const code = (await waitForTelegramReply(300000, 'código 2FA (E-mail)')) ?? '';
+  // Aguarda o código entregue por POST /2fa a partir do Console Admin.
+  const code = (await waitFor2FACode(300000, 'código 2FA (E-mail)')) ?? '';
 
   if (!code) {
     console.log('  ⚠️  Nenhum código recebido. Cancelando tentativa de 2FA...');
@@ -219,23 +285,42 @@ async function handle2FA(page: Page): Promise<boolean> {
       if (ph.toLowerCase().includes('code') || ph.toLowerCase().includes('código')) {
         await input.click({ clickCount: 3 });
         await input.type(code);
+        codeInserted = true;
         break;
       }
     }
   }
 
+  if (!codeInserted) {
+    console.log('  ❌ Campo para inserir o código 2FA não foi encontrado.');
+    return false;
+  }
+
   // Clica no botão "Confirm"
   const buttons = await page.$$('button');
+  let confirmClicked = false;
   for (const btn of buttons) {
     const text = await btn.evaluate((el: Element) => el.textContent || '');
     if (text.includes('Confirm') || text.includes('确认') || text.includes('Confirmar') || text.includes('Verify')) {
       await btn.click();
       console.log('  ✅ Código 2FA inserido e confirmado!');
+      confirmClicked = true;
       break;
     }
   }
 
-  await delay(3000);
+  if (!confirmClicked) {
+    console.log('  ❌ Botão de confirmação do 2FA não foi encontrado.');
+    return false;
+  }
+
+  await delay(5000);
+  const stillOnSecurityPage = page.url().includes('/info/accountSecurity');
+  if (stillOnSecurityPage) {
+    console.log('  ❌ O painel permaneceu na tela de segurança após confirmar o código.');
+    return false;
+  }
+
   return true;
 }
 
@@ -501,15 +586,20 @@ export async function loginToPanel(config: {
       await delay(3000);
 
       // Trata 2FA se aparecer
-      await handle2FA(page);
+      const twoFACompleted = await handle2FA(page);
       await delay(2000);
 
       // Verifica sucesso
       const currentUrl = page.url();
-      if (!currentUrl.includes('login') || currentUrl.includes('/info/accountSecurity')) {
+      const stillOnLogin = currentUrl.includes('login');
+      const stillOnSecurity = currentUrl.includes('/info/accountSecurity');
+      if (!stillOnLogin && !stillOnSecurity) {
         loginSuccessful = true;
       } else {
-        console.log(`    ⚠️ [${loginAttempts}/${maxLoginAttempts}] Login falhou — captcha incorreto ou sessão expirada.`);
+        const reason = stillOnSecurity && !twoFACompleted
+          ? '2FA não concluído'
+          : 'captcha incorreto ou sessão expirada';
+        console.log(`    ⚠️ [${loginAttempts}/${maxLoginAttempts}] Login falhou — ${reason}.`);
         console.log(`    🔄 Renovando captcha para próxima tentativa...`);
         // Salva screenshot para debug
         await debugScreenshot(page, path.join(__dirname, '..', 'output', `login_fail_attempt_${loginAttempts}.png`));
@@ -551,20 +641,30 @@ export async function loginToPanel(config: {
     }
   }
 
-  // Salva cookies para próximas sessões
-  await saveCookies(page);
-
   const finalUrl = page.url();
-  const successful = loginSuccessful || (!finalUrl.includes('login') || finalUrl.includes('/info/accountSecurity'));
+  let successful = loginSuccessful
+    || (!finalUrl.includes('login') && !finalUrl.includes('/info/accountSecurity'));
   
   if (successful) {
+    // Só persiste cookies depois que login e 2FA realmente terminaram.
+    await saveCookies(page);
     console.log('\n  ✅ Login realizado com sucesso!');
     console.log(`  📍 Página atual: ${finalUrl}\n`);
   } else {
     console.log('\n  ⚠️  Parece que o login não foi concluído.');
+    if (config.headless) {
+      throw new Error('Login do StarHome não concluído: autenticação ou 2FA pendente.');
+    }
+
     console.log('  📍 Verifique a janela do navegador e faça login manualmente se necessário.');
     console.log('  ⏳ Aguardando 30 segundos para login manual...\n');
     await delay(30000);
+
+    const manualUrl = page.url();
+    successful = !manualUrl.includes('login') && !manualUrl.includes('/info/accountSecurity');
+    if (!successful) {
+      throw new Error('Login manual do StarHome não foi concluído dentro do prazo.');
+    }
     await saveCookies(page);
   }
 
