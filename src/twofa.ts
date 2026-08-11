@@ -125,7 +125,16 @@ export function get2FAStatus(expectedSessionId?: string): {
   if (activeWait) {
     const remainingMs = activeWait.expiresAt - now();
     if (remainingMs <= 0) {
+      // Memória expirou: remove também o arquivo da mesma sessão para que o
+      // estado terminal não "reapareça" vindo do fallback na chamada seguinte.
+      const expiredSession = activeWait.sessionId;
       activeWait = null;
+      if (fs.existsSync(WAITING_FILE)) {
+        try {
+          const raw = JSON.parse(fs.readFileSync(WAITING_FILE, 'utf-8')) as Partial<WaitingPayload>;
+          if (raw.sessionId === expiredSession) fs.unlinkSync(WAITING_FILE);
+        } catch {}
+      }
       return { state: 'none', sessionId: null, remainingMs: 0, matches: true };
     }
     if (expectedSessionId && activeWait.sessionId !== expectedSessionId) {
@@ -161,16 +170,23 @@ export function is2FAWaiting(sessionId?: string): boolean {
   return get2FAStatus(sessionId).state === 'waiting';
 }
 
-/** Marca o estado atual da tentativa (consumed/accepted/rejected). */
+/** Marca o estado atual da tentativa (consumed/accepted/rejected).
+ * Para estados terminais, estende expiresAt por TERMINAL_RETENTION_MS em
+ * memória E no arquivo, para que o status seja observável o mesmo tempo nos
+ * dois modos (compartilhado e filho). */
 export function set2FAState(sessionId: string, state: TwoFAState): void {
+  const isTerminal = state === 'consumed' || state === 'accepted' || state === 'rejected';
+  const terminalExpiry = now() + TERMINAL_RETENTION_MS;
   if (activeWait && activeWait.sessionId === sessionId) {
     activeWait.state = state;
+    if (isTerminal) activeWait.expiresAt = terminalExpiry;
   }
   if (fs.existsSync(WAITING_FILE)) {
     try {
       const raw = JSON.parse(fs.readFileSync(WAITING_FILE, 'utf-8')) as WaitingPayload;
       if (raw.sessionId === sessionId) {
         raw.state = state;
+        if (isTerminal) raw.expiresAt = terminalExpiry;
         fs.writeFileSync(WAITING_FILE, JSON.stringify(raw));
       }
     } catch {}
@@ -283,20 +299,16 @@ export async function waitFor2FACode(
 
     // Fim da espera: marca o estado e mantém o registro por um curto TTL para
     // que accepted/rejected (definidos por loginToPanel) fiquem observáveis.
+    // set2FAState estende expiresAt para TERMINAL_RETENTION_MS em memória e no
+    // arquivo, mantendo ambos os modos (compartilhado/filho) coerentes.
     aborted = true;
     if (activeWait && activeWait.sessionId === sessionId) {
       activeWait.resolve = undefined;
-      if (code) {
-        activeWait.state = 'consumed';
-        activeWait.expiresAt = now() + TERMINAL_RETENTION_MS;
-      } else {
-        activeWait.state = 'rejected';
-        activeWait.expiresAt = now() + TERMINAL_RETENTION_MS;
-      }
+      set2FAState(sessionId, code ? 'consumed' : 'rejected');
     }
     // No modo filho, persiste o estado terminal no arquivo para o pai ler.
-    if (fs.existsSync(WAITING_FILE)) {
-      set2FAState(sessionId, code ? 'consumed' : 'rejected');
+    if (fs.existsSync(WAITING_FILE) && !code) {
+      set2FAState(sessionId, 'rejected');
     }
 
     if (code) {

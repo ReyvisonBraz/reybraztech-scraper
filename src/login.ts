@@ -276,6 +276,7 @@ async function handle2FA(page: Page, sessionId: string): Promise<'not-required' 
     if (input) {
       await input.click({ clickCount: 3 });
       await input.type(code);
+      await mark2FAChallengeInput(page, selector);
       codeInserted = true;
       break;
     }
@@ -289,6 +290,7 @@ async function handle2FA(page: Page, sessionId: string): Promise<'not-required' 
       if (ph.toLowerCase().includes('code') || ph.toLowerCase().includes('código')) {
         await input.click({ clickCount: 3 });
         await input.type(code);
+        await mark2FAChallengeInput(page, null);
         codeInserted = true;
         break;
       }
@@ -339,36 +341,50 @@ async function handle2FA(page: Page, sessionId: string): Promise<'not-required' 
 }
 
 /**
- * Espera o desafio 2FA desaparecer da página (modal/input fechados).
- * Retorna true se não houver mais elemento 2FA visível dentro do prazo.
+ * Marca o elemento do desafio 2FA (o input de código e seu modal/container
+ * mais próximo) com um atributo temporário. Isso permite, após Confirm, esperar
+ * que ELE desapareça, sem depender de idioma (chinês/inglês) nem varrer a
+ * página inteira por texto.
+ */
+async function mark2FAChallengeInput(page: Page, selector: string | null): Promise<void> {
+  const marker = 'data-traycer-2fa';
+  await page.evaluate((markerName) => {
+    const mark = (el: Element | null) => { if (el) el.setAttribute(markerName, '1'); };
+    // Marca o input de código usado.
+    if (selector) mark(document.querySelector(selector));
+    else {
+      // Fallback: marca o último input de texto visível (o que acabamos de usar).
+      const inputs = Array.from(document.querySelectorAll('input[type="text"]'));
+      for (let i = inputs.length - 1; i >= 0; i--) {
+        if (inputs[i].getBoundingClientRect().height > 0) { mark(inputs[i]); break; }
+      }
+    }
+    // Marca o diálogo/modal mais próximo do input marcado.
+    const markedInput = document.querySelector(`[${markerName}]`);
+    if (markedInput) {
+      const dialog = markedInput.closest('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal');
+      if (dialog) mark(dialog);
+    }
+  }, marker);
+}
+
+/**
+ * Espera o desafio 2FA desaparecer. Retorna true quando nenhum elemento marcado
+ * como `data-traycer-2fa` (input/modal) está visível ou ainda no DOM.
  */
 async function waitForChallengeToClear(page: Page, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const visible2FA = await page.evaluate(() => {
+    const stillVisible = await page.evaluate(() => {
       const isVisible = (el: Element) => {
         const s = window.getComputedStyle(el);
-        return s.display !== 'none' && s.visibility !== 'hidden' && el.getBoundingClientRect().height > 0;
+        return s.display !== 'none' && s.visibility !== 'hidden'
+          && el.getBoundingClientRect().height > 0 && el.getBoundingClientRect().width > 0;
       };
-      // Input de código 2FA visível (modal ou tela de segurança)
-      const inputs = Array.from(document.querySelectorAll('input[type="text"], input'));
-      for (const input of inputs) {
-        const ph = (input.getAttribute('placeholder') || '').toLowerCase();
-        if (isVisible(input) && (ph.includes('code') || ph.includes('código') || ph.includes('verif'))) {
-          return true;
-        }
-      }
-      // Diálogo/modal ainda aberto
-      const dialogs = Array.from(document.querySelectorAll('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal'));
-      for (const d of dialogs) {
-        if (isVisible(d)) {
-          const txt = (d.textContent || '').toLowerCase();
-          if (txt.includes('code') || txt.includes('código') || txt.includes('verif')) return true;
-        }
-      }
-      return false;
+      const marked = Array.from(document.querySelectorAll('[data-traycer-2fa]'));
+      return marked.some(isVisible);
     });
-    if (!visible2FA) return true;
+    if (!stillVisible) return true;
     await delay(500);
   }
   return false;
