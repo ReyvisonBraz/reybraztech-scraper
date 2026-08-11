@@ -704,14 +704,23 @@ app.get('/jobs', authenticate, (_req, res) => {
 });
 
 // ─── 2FA via API ──────────────────────────────────────────────────────────────
-import { deliver2FACode, is2FAWaiting } from './twofa.js';
+import { deliver2FACode, get2FAStatus, cleanupStale2FA } from './twofa.js';
+
+// Limpa estado 2FA que possa ter sobrevivido a um crash (arquivo órfão).
+cleanupStale2FA();
 
 app.get('/2fa-status', authenticate, (_req, res) => {
-  res.json({ waiting: is2FAWaiting() });
+  const status = get2FAStatus();
+  res.json({
+    waiting: status.state === 'waiting',
+    state: status.state,
+    sessionId: status.sessionId,
+    remainingMs: status.remainingMs,
+  });
 });
 
 app.post('/2fa', authenticate, (req, res) => {
-  const { code } = req.body as { code?: string };
+  const { code, sessionId } = req.body as { code?: string; sessionId?: string };
   if (!code || typeof code !== 'string') {
     res.status(400).json({ error: 'Código 2FA é obrigatório' }); return;
   }
@@ -719,12 +728,13 @@ app.post('/2fa', authenticate, (req, res) => {
   if (!/^\d{6}$/.test(normalizedCode)) {
     res.status(400).json({ error: 'Código 2FA deve conter exatamente 6 dígitos' }); return;
   }
-  const ok = deliver2FACode(normalizedCode);
-  if (ok) {
-    log('info', '2FA code delivered to scraper');
-    res.json({ ok: true, message: 'Código 2FA recebido. Scraper retomando...' });
+  const result = deliver2FACode(normalizedCode, { sessionId });
+  if (result.ok) {
+    log('info', '2FA code delivered to scraper', { status: result.status });
+    res.json({ ok: true, message: 'Código 2FA recebido. Scraper retomando...', state: result.status });
   } else {
-    res.status(409).json({ error: 'Nenhuma sessão 2FA aguardando código no momento.' });
+    // none / consumed / accepted / rejected — fora da janela ou duplicado
+    res.status(409).json({ error: result.error, state: result.status });
   }
 });
 

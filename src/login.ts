@@ -5,7 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { solveCaptcha } from './captcha';
 import { sendTelegramMessage } from './telegram';
-import { waitFor2FACode } from './twofa';
+import { waitFor2FACode, new2FASessionId, set2FAState } from './twofa';
 import { debugScreenshot } from './cleanup';
 import type { Page, Browser } from 'puppeteer';
 
@@ -108,8 +108,12 @@ async function loadCookies(page: Page): Promise<boolean> {
 
 /**
  * Verifica se a tela de 2FA apareceu (seja modal ou redirecionamento) e lida com ela.
+ * Retorna um estado explícito:
+ *  - 'not-required' — nenhum desafio 2FA detectado
+ *  - 'completed'    — 2FA concluído e autenticado
+ *  - 'failed'       — 2FA falhou (envio, espera, código, confirmação ou modal pendente)
  */
-async function handle2FA(page: Page): Promise<boolean> {
+async function handle2FA(page: Page, sessionId: string): Promise<'not-required' | 'completed' | 'failed'> {
   await delay(2000);
 
   // Procura o botão de enviar código ou o input de código para confirmar que é realmente 2FA
@@ -151,12 +155,12 @@ async function handle2FA(page: Page): Promise<boolean> {
   let isSecurityPage = url.includes('/info/accountSecurity');
 
   if (!has2FAElements && !isSecurityPage) {
-    return false;
+    return 'not-required';
   }
-  
+
   if (!has2FAElements) {
      // Even if it's security page, if no 2FA elements are visible, it was probably just a dashboard that looks like security page
-     return false;
+     return 'not-required';
   }
 
   console.log('\n  🔒 Verificação de 2FA detectada! (Dispositivo / Navegador desconhecido)');
@@ -230,7 +234,7 @@ async function handle2FA(page: Page): Promise<boolean> {
       '❌ <b>Não foi possível solicitar o código 2FA.</b>\n\n' +
       'O botão de envio do StarHome não foi encontrado ou estava desabilitado. O job será encerrado sem afirmar que o e-mail foi enviado.'
     ).catch(() => {});
-    return false;
+    return 'failed';
   }
 
   const dispatchConfirmed = await waitForCodeDispatchFeedback(page);
@@ -249,11 +253,11 @@ async function handle2FA(page: Page): Promise<boolean> {
   ).catch(() => {});
 
   // Aguarda o código entregue por POST /2fa a partir do Console Admin.
-  const code = (await waitFor2FACode(300000, 'código 2FA (E-mail)')) ?? '';
+  const code = (await waitFor2FACode(sessionId, 300000, 'código 2FA (E-mail)')) ?? '';
 
   if (!code) {
     console.log('  ⚠️  Nenhum código recebido. Cancelando tentativa de 2FA...');
-    return false;
+    return 'failed';
   }
 
   // Encontra o campo de input do código e preenche
@@ -293,7 +297,7 @@ async function handle2FA(page: Page): Promise<boolean> {
 
   if (!codeInserted) {
     console.log('  ❌ Campo para inserir o código 2FA não foi encontrado.');
-    return false;
+    return 'failed';
   }
 
   // Clica no botão "Confirm"
@@ -311,17 +315,17 @@ async function handle2FA(page: Page): Promise<boolean> {
 
   if (!confirmClicked) {
     console.log('  ❌ Botão de confirmação do 2FA não foi encontrado.');
-    return false;
+    return 'failed';
   }
 
   await delay(5000);
   const stillOnSecurityPage = page.url().includes('/info/accountSecurity');
   if (stillOnSecurityPage) {
     console.log('  ❌ O painel permaneceu na tela de segurança após confirmar o código.');
-    return false;
+    return 'failed';
   }
 
-  return true;
+  return 'completed';
 }
 
 /**
@@ -336,6 +340,9 @@ export async function loginToPanel(config: {
   proxyAuth?: { username: string; password: string; };
 }): Promise<{ browser: Browser; page: Page }> {
   console.log('\n🚀 Iniciando login no painel StarHome...\n');
+
+  // Identifica esta tentativa de login; usado pelo canal 2FA (memória/arquivo).
+  const sessionId = new2FASessionId();
 
   const isLinux = process.platform === 'linux';
   let chromePath: string | undefined;
@@ -417,7 +424,8 @@ export async function loginToPanel(config: {
   };
 
   const browser = await puppeteer.launch(launchOptions);
-  let page = await browser.newPage();
+  try {
+    let page = await browser.newPage();
   
   // Autenticação do proxy, caso seja proxy privado
   if (config.proxyAuth && config.proxyAuth.username) {
@@ -479,21 +487,35 @@ export async function loginToPanel(config: {
     console.log('  ⚠️ Cloudflare challenge pode ainda estar ativo, tentando prosseguir...');
   });
 
-  // Verifica PRIMEIRO se cookies já estão válidos (caminho rápido)
+  // Verifica PRIMEIRO se cookies já estão válidos (caminho rápido).
+  // Exclui /info/accountSecurity: sessão conhecida que voltou a exigir 2FA
+  // NÃO deve ser tratada como já logada.
   let alreadyLoggedIn = false;
   try {
     await page.waitForFunction(
-      () => !window.location.href.includes('login'),
+      () => !window.location.href.includes('login')
+          && !window.location.href.includes('/info/accountSecurity'),
       { timeout: 8000, polling: 500 }
     );
     alreadyLoggedIn = true;
   } catch {
-    // Ainda na tela de login — precisa preencher o formulário
+    // Ainda no login ou em /info/accountSecurity — precisa autenticar/2FA
   }
 
   if (alreadyLoggedIn) {
     console.log('  ✅ Já autenticado via cookies salvos!');
     return { browser, page };
+  }
+
+  // Cookies levaram ao desafio /info/accountSecurity: trata o 2FA antes de
+  // seguir para o formulário (mesmo fluxo centralizado de um login novo).
+  if (page.url().includes('/info/accountSecurity')) {
+    const twoFAState = await handle2FA(page, sessionId);
+    if (twoFAState === 'completed') {
+      console.log('  ✅ 2FA concluído a partir da sessão por cookies.');
+      return { browser, page };
+    }
+    // Se falhou, segue para o formulário de login.
   }
 
   // Aguarda o formulário de login renderizar
@@ -525,6 +547,7 @@ export async function loginToPanel(config: {
   let loginSuccessful = false;
   let loginAttempts = 0;
   const maxLoginAttempts = 5; // Tenta até 5 vezes antes do fallback manual
+  let any2FAFailed = false; // Qualquer tentativa com 2FA falho proíbe sucesso/cookies
 
   while (!loginSuccessful && loginAttempts < maxLoginAttempts) {
     loginAttempts++;
@@ -586,17 +609,20 @@ export async function loginToPanel(config: {
       await delay(3000);
 
       // Trata 2FA se aparecer
-      const twoFACompleted = await handle2FA(page);
+      const twoFAState = await handle2FA(page, sessionId);
       await delay(2000);
 
-      // Verifica sucesso
+      // Verifica sucesso: só conta como sucesso se 2FA não falhou e saiu da
+      // tela de login/segurança. Um 2FA falho nunca é promovido a sucesso.
       const currentUrl = page.url();
       const stillOnLogin = currentUrl.includes('login');
       const stillOnSecurity = currentUrl.includes('/info/accountSecurity');
-      if (!stillOnLogin && !stillOnSecurity) {
+      const twoFAFailed = twoFAState === 'failed';
+      if (twoFAFailed) any2FAFailed = true;
+      if (!stillOnLogin && !stillOnSecurity && !twoFAFailed) {
         loginSuccessful = true;
       } else {
-        const reason = stillOnSecurity && !twoFACompleted
+        const reason = stillOnSecurity || twoFAFailed
           ? '2FA não concluído'
           : 'captcha incorreto ou sessão expirada';
         console.log(`    ⚠️ [${loginAttempts}/${maxLoginAttempts}] Login falhou — ${reason}.`);
@@ -642,15 +668,17 @@ export async function loginToPanel(config: {
   }
 
   const finalUrl = page.url();
-  let successful = loginSuccessful
-    || (!finalUrl.includes('login') && !finalUrl.includes('/info/accountSecurity'));
+  let successful = !any2FAFailed && (loginSuccessful
+    || (!finalUrl.includes('login') && !finalUrl.includes('/info/accountSecurity')));
   
   if (successful) {
     // Só persiste cookies depois que login e 2FA realmente terminaram.
     await saveCookies(page);
+    set2FAState(sessionId, 'accepted');
     console.log('\n  ✅ Login realizado com sucesso!');
     console.log(`  📍 Página atual: ${finalUrl}\n`);
   } else {
+    set2FAState(sessionId, 'rejected');
     console.log('\n  ⚠️  Parece que o login não foi concluído.');
     if (config.headless) {
       throw new Error('Login do StarHome não concluído: autenticação ou 2FA pendente.');
@@ -669,4 +697,9 @@ export async function loginToPanel(config: {
   }
 
   return { browser, page };
+  } catch (err) {
+    // Nunca deixar o Chromium órfão: fecha o browser em todo caminho que lança.
+    try { await browser.close(); } catch {}
+    throw err;
+  }
 }
