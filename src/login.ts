@@ -5,7 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { solveCaptcha } from './captcha';
 import { sendTelegramMessage } from './telegram';
-import { waitFor2FACode } from './twofa';
+import { waitFor2FACode, new2FASessionId, set2FAState } from './twofa';
 import { debugScreenshot } from './cleanup';
 import type { Page, Browser } from 'puppeteer';
 
@@ -24,6 +24,54 @@ function humanDelay(minMs: number = 300, maxMs: number = 1200): Promise<void> {
 /** Espera exatos N milissegundos */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeUiText(text: string): string {
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+}
+
+function isSendCodeLabel(text: string): boolean {
+  const normalized = normalizeUiText(text);
+  return normalized.includes('send')
+    || normalized.includes('enviar')
+    || normalized.includes('get code')
+    || normalized.includes('obter codigo')
+    || normalized.includes('发送')
+    || normalized.includes('获取验证码');
+}
+
+async function waitForCodeDispatchFeedback(page: Page): Promise<boolean> {
+  try {
+    await page.waitForFunction(() => {
+      const selectors = [
+        '.el-message',
+        '.el-notification',
+        '.ant-message',
+        '.ant-notification',
+        '[role="alert"]',
+      ];
+      const text = selectors
+        .flatMap(selector => Array.from(document.querySelectorAll(selector)))
+        .map(element => element.textContent || '')
+        .join(' ')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+
+      return text.includes('sent')
+        || text.includes('enviado')
+        || text.includes('enviada')
+        || text.includes('success')
+        || text.includes('sucesso');
+    }, { timeout: 6000, polling: 250 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 
@@ -60,8 +108,12 @@ async function loadCookies(page: Page): Promise<boolean> {
 
 /**
  * Verifica se a tela de 2FA apareceu (seja modal ou redirecionamento) e lida com ela.
+ * Retorna um estado explícito:
+ *  - 'not-required' — nenhum desafio 2FA detectado
+ *  - 'completed'    — 2FA concluído e autenticado
+ *  - 'failed'       — 2FA falhou (envio, espera, código, confirmação ou modal pendente)
  */
-async function handle2FA(page: Page): Promise<boolean> {
+async function handle2FA(page: Page, sessionId: string): Promise<'not-required' | 'completed' | 'failed'> {
   await delay(2000);
 
   // Procura o botão de enviar código ou o input de código para confirmar que é realmente 2FA
@@ -70,7 +122,7 @@ async function handle2FA(page: Page): Promise<boolean> {
   const detectButtons = await page.$$('button, span.text-primary, a.text-primary');
   for (const btn of detectButtons) {
     const text = await btn.evaluate((el: Element) => el.textContent || '');
-    if (text.includes('Send') || text.includes('Enviar') || text.includes('Get code')) {
+    if (isSendCodeLabel(text)) {
       const isVisible = await btn.evaluate((el) => {
         const style = window.getComputedStyle(el);
         return style.display !== 'none' && style.visibility !== 'hidden' && el.getBoundingClientRect().height > 0;
@@ -103,12 +155,12 @@ async function handle2FA(page: Page): Promise<boolean> {
   let isSecurityPage = url.includes('/info/accountSecurity');
 
   if (!has2FAElements && !isSecurityPage) {
-    return false;
+    return 'not-required';
   }
-  
+
   if (!has2FAElements) {
      // Even if it's security page, if no 2FA elements are visible, it was probably just a dashboard that looks like security page
-     return false;
+     return 'not-required';
   }
 
   console.log('\n  🔒 Verificação de 2FA detectada! (Dispositivo / Navegador desconhecido)');
@@ -153,41 +205,59 @@ async function handle2FA(page: Page): Promise<boolean> {
   const allButtons = await page.$$('button, span.text-primary, a.text-primary');
   for (const btn of allButtons) {
     const text = await btn.evaluate((el: Element) => el.textContent || '');
-    if (text.includes('Send') || text.includes('Enviar') || text.includes('Get code')) {
-      const isVisible = await btn.evaluate((el: any) => {
+    if (isSendCodeLabel(text)) {
+      const isClickable = await btn.evaluate((el: any) => {
         const s = window.getComputedStyle(el);
-        return s.display !== 'none' && s.visibility !== 'hidden' && el.getBoundingClientRect().height > 0;
+        const clickable = el.closest('button, a') || el;
+        return s.display !== 'none'
+          && s.visibility !== 'hidden'
+          && el.getBoundingClientRect().height > 0
+          && !clickable.disabled
+          && clickable.getAttribute('aria-disabled') !== 'true';
       });
-      if (isVisible) {
-        await (btn as any).click();
-        console.log('  📤 Botão "Send" clicado — E-mail sendo enviado pelo painel...');
+      if (isClickable) {
+        await btn.evaluate((el: any) => {
+          const clickable = el.closest('button, a') || el;
+          clickable.scrollIntoView({ block: 'center', inline: 'center' });
+          clickable.click();
+        });
+        console.log('  📤 Clique no botão de envio do código acionado.');
         sendClicked = true;
-        await new Promise(r => setTimeout(r, 1500));
         break;
       }
     }
   }
 
   if (!sendClicked) {
-    console.log('  ⚠️  Botão "Send" não encontrado — o painel pode já ter enviado o código.');
+    console.log('  ❌ Botão de envio do código não foi encontrado ou estava desabilitado.');
+    await sendTelegramMessage(
+      '❌ <b>Não foi possível solicitar o código 2FA.</b>\n\n' +
+      'O botão de envio do StarHome não foi encontrado ou estava desabilitado. O job será encerrado sem afirmar que o e-mail foi enviado.'
+    ).catch(() => {});
+    return 'failed';
   }
 
-  // PASSO 3: Notifica pelo Telegram (aviso apenas, não espera resposta)
-  const { waitForTelegramReply } = await import('./telegram');
+  const dispatchConfirmed = await waitForCodeDispatchFeedback(page);
+  console.log(dispatchConfirmed
+    ? '  ✅ O painel exibiu uma confirmação após solicitar o código.'
+    : '  ⚠️ Clique acionado, mas o painel não exibiu confirmação verificável de envio.');
 
+  // PASSO 3: Notifica pelo Telegram. O código deve ser entregue pelo Console Admin.
   await sendTelegramMessage(
     '🔐 <b>Código 2FA (E-mail) necessário!</b>\n\n' +
     'O painel StarHome detectou um novo dispositivo.\n' +
-    '📧 O e-mail com o código de acesso já foi disparado pelo painel.\n\n' +
-    '➡️ <b>Por favor, digite o código de 6 dígitos que recebeu no e-mail aqui.</b>'
+    (dispatchConfirmed
+      ? '📧 O painel confirmou a solicitação do código por e-mail.\n\n'
+      : '⚠️ O clique de envio foi acionado, mas o painel não mostrou confirmação. Confira também Spam e Promoções.\n\n') +
+    '➡️ <b>Digite o código de 6 dígitos no campo amarelo do Console Admin.</b>'
   ).catch(() => {});
 
-  // Aguarda 2FA pelo Telegram diretamente (ou terminal se não configurado)
-  const code = (await waitForTelegramReply(300000, 'código 2FA (E-mail)')) ?? '';
+  // Aguarda o código entregue por POST /2fa a partir do Console Admin.
+  const code = (await waitFor2FACode(sessionId, 300000, 'código 2FA (E-mail)')) ?? '';
 
   if (!code) {
     console.log('  ⚠️  Nenhum código recebido. Cancelando tentativa de 2FA...');
-    return false;
+    return 'failed';
   }
 
   // Encontra o campo de input do código e preenche
@@ -206,6 +276,7 @@ async function handle2FA(page: Page): Promise<boolean> {
     if (input) {
       await input.click({ clickCount: 3 });
       await input.type(code);
+      await mark2FAChallengeInput(page, input);
       codeInserted = true;
       break;
     }
@@ -219,24 +290,104 @@ async function handle2FA(page: Page): Promise<boolean> {
       if (ph.toLowerCase().includes('code') || ph.toLowerCase().includes('código')) {
         await input.click({ clickCount: 3 });
         await input.type(code);
+        await mark2FAChallengeInput(page, input);
+        codeInserted = true;
         break;
       }
     }
   }
 
+  if (!codeInserted) {
+    console.log('  ❌ Campo para inserir o código 2FA não foi encontrado.');
+    return 'failed';
+  }
+
   // Clica no botão "Confirm"
   const buttons = await page.$$('button');
+  let confirmClicked = false;
   for (const btn of buttons) {
     const text = await btn.evaluate((el: Element) => el.textContent || '');
     if (text.includes('Confirm') || text.includes('确认') || text.includes('Confirmar') || text.includes('Verify')) {
       await btn.click();
       console.log('  ✅ Código 2FA inserido e confirmado!');
+      confirmClicked = true;
       break;
     }
   }
 
-  await delay(3000);
-  return true;
+  if (!confirmClicked) {
+    console.log('  ❌ Botão de confirmação do 2FA não foi encontrado.');
+    return 'failed';
+  }
+
+  await delay(5000);
+  const stillOnSecurityPage = page.url().includes('/info/accountSecurity');
+  if (stillOnSecurityPage) {
+    console.log('  ❌ O painel permaneceu na tela de segurança após confirmar o código.');
+    return 'failed';
+  }
+
+  // Em um desafio renderizado como modal sobre uma rota autenticada, a URL não
+  // prova nada. Exige que o desafio realmente tenha sumido: nenhum input de
+  // código 2FA visível. Se ainda houver, o código foi recusado ou o modal segue
+  // aberto — trata como falha para não persistir cookies de sessão pendente.
+  const challengeCleared = await waitForChallengeToClear(page, 8000);
+  if (!challengeCleared) {
+    console.log('  ❌ Modal/input de 2FA ainda visível após confirmar o código — código recusado ou pendente.');
+    return 'failed';
+  }
+
+  return 'completed';
+}
+
+/**
+ * Marca o elemento exato do desafio 2FA (o input de código usado e seu
+ * modal/container mais próximo) com um atributo temporário. Recebe o próprio
+ * handle do input para nunca acompanhar o elemento errado (fallback) nem
+ * depender de idioma (chinês/inglês) ou de varrer a página por texto.
+ */
+async function mark2FAChallengeInput(page: Page, input: any): Promise<void> {
+  const marker = 'data-traycer-2fa';
+  await input.evaluate((el: Element, markerName: string) => {
+    el.setAttribute(markerName, '1');
+    const dialog = el.closest('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal');
+    if (dialog) dialog.setAttribute(markerName, '1');
+  }, marker);
+}
+
+/**
+ * Espera o desafio 2FA desaparecer. Retorna true quando:
+ *  - nenhum elemento marcado com `data-traycer-2fa` está visível; e
+ *  - nenhum diálogo/modal visível ainda contém um input (cobre o caso de o
+ *    framework remontar o modal após código recusado, perdendo o marcador).
+ * A checagem estrutural é restrita a diálogos, para não disparar falso
+ * negativo em um campo comum chamado "code" na rota autenticada.
+ */
+async function waitForChallengeToClear(page: Page, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const stillBlocked = await page.evaluate(() => {
+      const isVisible = (el: Element) => {
+        const s = window.getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden'
+          && el.getBoundingClientRect().height > 0 && el.getBoundingClientRect().width > 0;
+      };
+      // 1) Elemento marcado ainda visível (input/modal do desafio).
+      const marked = Array.from(document.querySelectorAll('[data-traycer-2fa]'));
+      if (marked.some(isVisible)) return true;
+      // 2) Desafio remontado: diálogo visível que ainda contém input.
+      const dialogs = Array.from(document.querySelectorAll('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal'));
+      for (const d of dialogs) {
+        if (!isVisible(d)) continue;
+        const hasInput = Array.from(d.querySelectorAll('input')).some(isVisible);
+        if (hasInput) return true;
+      }
+      return false;
+    });
+    if (!stillBlocked) return true;
+    await delay(500);
+  }
+  return false;
 }
 
 /**
@@ -251,6 +402,9 @@ export async function loginToPanel(config: {
   proxyAuth?: { username: string; password: string; };
 }): Promise<{ browser: Browser; page: Page }> {
   console.log('\n🚀 Iniciando login no painel StarHome...\n');
+
+  // Identifica esta tentativa de login; usado pelo canal 2FA (memória/arquivo).
+  const sessionId = new2FASessionId();
 
   const isLinux = process.platform === 'linux';
   let chromePath: string | undefined;
@@ -332,7 +486,8 @@ export async function loginToPanel(config: {
   };
 
   const browser = await puppeteer.launch(launchOptions);
-  let page = await browser.newPage();
+  try {
+    let page = await browser.newPage();
   
   // Autenticação do proxy, caso seja proxy privado
   if (config.proxyAuth && config.proxyAuth.username) {
@@ -394,21 +549,35 @@ export async function loginToPanel(config: {
     console.log('  ⚠️ Cloudflare challenge pode ainda estar ativo, tentando prosseguir...');
   });
 
-  // Verifica PRIMEIRO se cookies já estão válidos (caminho rápido)
+  // Verifica PRIMEIRO se cookies já estão válidos (caminho rápido).
+  // Exclui /info/accountSecurity: sessão conhecida que voltou a exigir 2FA
+  // NÃO deve ser tratada como já logada.
   let alreadyLoggedIn = false;
   try {
     await page.waitForFunction(
-      () => !window.location.href.includes('login'),
+      () => !window.location.href.includes('login')
+          && !window.location.href.includes('/info/accountSecurity'),
       { timeout: 8000, polling: 500 }
     );
     alreadyLoggedIn = true;
   } catch {
-    // Ainda na tela de login — precisa preencher o formulário
+    // Ainda no login ou em /info/accountSecurity — precisa autenticar/2FA
   }
 
   if (alreadyLoggedIn) {
     console.log('  ✅ Já autenticado via cookies salvos!');
     return { browser, page };
+  }
+
+  // Cookies levaram ao desafio /info/accountSecurity: trata o 2FA antes de
+  // seguir para o formulário (mesmo fluxo centralizado de um login novo).
+  if (page.url().includes('/info/accountSecurity')) {
+    const twoFAState = await handle2FA(page, sessionId);
+    if (twoFAState === 'completed') {
+      console.log('  ✅ 2FA concluído a partir da sessão por cookies.');
+      return { browser, page };
+    }
+    // Se falhou, segue para o formulário de login.
   }
 
   // Aguarda o formulário de login renderizar
@@ -440,6 +609,7 @@ export async function loginToPanel(config: {
   let loginSuccessful = false;
   let loginAttempts = 0;
   const maxLoginAttempts = 5; // Tenta até 5 vezes antes do fallback manual
+  let any2FAFailed = false; // Qualquer tentativa com 2FA falho proíbe sucesso/cookies
 
   while (!loginSuccessful && loginAttempts < maxLoginAttempts) {
     loginAttempts++;
@@ -501,15 +671,23 @@ export async function loginToPanel(config: {
       await delay(3000);
 
       // Trata 2FA se aparecer
-      await handle2FA(page);
+      const twoFAState = await handle2FA(page, sessionId);
       await delay(2000);
 
-      // Verifica sucesso
+      // Verifica sucesso: só conta como sucesso se 2FA não falhou e saiu da
+      // tela de login/segurança. Um 2FA falho nunca é promovido a sucesso.
       const currentUrl = page.url();
-      if (!currentUrl.includes('login') || currentUrl.includes('/info/accountSecurity')) {
+      const stillOnLogin = currentUrl.includes('login');
+      const stillOnSecurity = currentUrl.includes('/info/accountSecurity');
+      const twoFAFailed = twoFAState === 'failed';
+      if (twoFAFailed) any2FAFailed = true;
+      if (!stillOnLogin && !stillOnSecurity && !twoFAFailed) {
         loginSuccessful = true;
       } else {
-        console.log(`    ⚠️ [${loginAttempts}/${maxLoginAttempts}] Login falhou — captcha incorreto ou sessão expirada.`);
+        const reason = stillOnSecurity || twoFAFailed
+          ? '2FA não concluído'
+          : 'captcha incorreto ou sessão expirada';
+        console.log(`    ⚠️ [${loginAttempts}/${maxLoginAttempts}] Login falhou — ${reason}.`);
         console.log(`    🔄 Renovando captcha para próxima tentativa...`);
         // Salva screenshot para debug
         await debugScreenshot(page, path.join(__dirname, '..', 'output', `login_fail_attempt_${loginAttempts}.png`));
@@ -551,22 +729,39 @@ export async function loginToPanel(config: {
     }
   }
 
-  // Salva cookies para próximas sessões
-  await saveCookies(page);
-
   const finalUrl = page.url();
-  const successful = loginSuccessful || (!finalUrl.includes('login') || finalUrl.includes('/info/accountSecurity'));
+  let successful = !any2FAFailed && (loginSuccessful
+    || (!finalUrl.includes('login') && !finalUrl.includes('/info/accountSecurity')));
   
   if (successful) {
+    // Só persiste cookies depois que login e 2FA realmente terminaram.
+    await saveCookies(page);
+    set2FAState(sessionId, 'accepted');
     console.log('\n  ✅ Login realizado com sucesso!');
     console.log(`  📍 Página atual: ${finalUrl}\n`);
   } else {
+    set2FAState(sessionId, 'rejected');
     console.log('\n  ⚠️  Parece que o login não foi concluído.');
+    if (config.headless) {
+      throw new Error('Login do StarHome não concluído: autenticação ou 2FA pendente.');
+    }
+
     console.log('  📍 Verifique a janela do navegador e faça login manualmente se necessário.');
     console.log('  ⏳ Aguardando 30 segundos para login manual...\n');
     await delay(30000);
+
+    const manualUrl = page.url();
+    successful = !manualUrl.includes('login') && !manualUrl.includes('/info/accountSecurity');
+    if (!successful) {
+      throw new Error('Login manual do StarHome não foi concluído dentro do prazo.');
+    }
     await saveCookies(page);
   }
 
   return { browser, page };
+  } catch (err) {
+    // Nunca deixar o Chromium órfão: fecha o browser em todo caminho que lança.
+    try { await browser.close(); } catch {}
+    throw err;
+  }
 }
