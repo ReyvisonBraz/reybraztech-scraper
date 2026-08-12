@@ -410,36 +410,57 @@ function detectLoginStage(): LoginStage {
       && el.getBoundingClientRect().height > 0 && el.getBoundingClientRect().width > 0;
   };
 
-  // Sinal positivo de 2FA: input de código visível (placeholder code/código).
-  // Usa o mesmo critério específico do handle2FA; um diálogo genérico com
-  // qualquer input (filtro/edição/busca) NÃO configura 2FA sozinho.
   const visibleInputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
-  const isCodeInput = (el: HTMLInputElement) => {
-    const ph = (el.getAttribute('placeholder') || '').toLowerCase();
-    return ph.includes('code') || ph.includes('código') || ph.includes('codigo');
-  };
-  if (visibleInputs.some(isCodeInput)) {
-    return 'twofa';
-  }
+  const visibleText = (document.body.innerText || '');
+  const norm = (t: string) => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
 
-  // Diálogo/modal que, além de visível, contém um INPUT DE CÓDIGO visível é um
-  // desafio 2FA. Não basta ter input qualquer.
-  const dialogs = Array.from(document.querySelectorAll('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal'));
-  for (const d of dialogs) {
-    if (!isVisible(d)) continue;
-    const hasCodeField = Array.from(d.querySelectorAll('input')).filter(isVisible).some(isCodeInput);
-    if (hasCodeField) return 'twofa';
-  }
+  // Container de desafio 2FA (dialog/modal) — só é 2FA se tiver sinal específico
+  // (input de código ou controle de envio/verificação), não por ter input qualquer.
+  const isDialog = (el: Element) => el.closest('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal');
+  const dialogs = Array.from(document.querySelectorAll('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal')).filter(isVisible);
 
-  // Login form: campo de senha visível (com 2+ inputs = conta/senha/captcha).
-  const passInputs = Array.from(document.querySelectorAll('input[type="password"]')).filter(isVisible);
-  const textInputs = Array.from(document.querySelectorAll('input[type="text"], input.el-input__inner, input.ant-input')).filter(isVisible);
+  // Login form tem precedência: conta + senha + captcha. Um campo de captcha pode
+  // ter placeholder "verification code" — com senha visível é login, não 2FA.
+  const passInputs = visibleInputs.filter(el => el.type === 'password');
   if (passInputs.length > 0) {
     return 'login-form';
   }
+
+  // 2FA: input de código por placeholder OU classe `.code-input`, OU botão de
+  // envio/verificação (mesmos sinais do handle2FA). Se estiver dentro de um
+  // container de desafio visível, é definitivamente 2FA.
+  const isCodeInput = (el: HTMLInputElement) => {
+    const ph = norm(el.getAttribute('placeholder') || '');
+    return ph.includes('code') || ph.includes('codigo') || !!el.closest('.code-input');
+  };
+  const hasSendControl = (root: Document | Element) =>
+    Array.from(root.querySelectorAll('button, span.text-primary, a.text-primary')).some(el => {
+      if (!isVisible(el)) return false;
+      const t = norm(el.textContent || '');
+      return t.includes('send') || t.includes('enviar') || t.includes('get code')
+        || t.includes('obter codigo') || t.includes('获取验证码') || t.includes('发送')
+        || t.includes('verify') || t.includes('confirmar') || t.includes('确认');
+    });
+
+  // Dialog visível com input de código ou controle de envio → desafio 2FA.
+  for (const d of dialogs) {
+    const codeField = Array.from(d.querySelectorAll('input')).filter(isVisible).some(isCodeInput);
+    if (codeField || hasSendControl(d)) return 'twofa';
+  }
+
+  // Fora de dialog: input de código visível na página (tela de Security Account).
+  if (visibleInputs.some(isCodeInput)) {
+    return 'twofa';
+  }
+  // Tela cheia de Security/2FA com botão de envio e sem menu de dashboard.
+  if (hasSendControl(document) && !document.querySelector('aside, .el-menu, .sidebar, nav')) {
+    return 'twofa';
+  }
+
+  // Formulário de login em montagem: vários inputs de texto + texto de login.
+  const textInputs = visibleInputs.filter(el => el.type === 'text' || el.tagName === 'INPUT');
   if (textInputs.length >= 2) {
-    // Pode ser a tela de login sem senha visível ainda renderizada.
-    const loginText = (document.body.innerText || '').toLowerCase();
+    const loginText = norm(visibleText);
     if (loginText.includes('login') || document.querySelector('.login-form, .el-form')) {
       return 'login-form';
     }
@@ -447,7 +468,6 @@ function detectLoginStage(): LoginStage {
 
   // Dashboard: sem formulário de login nem 2FA (que já retornaram acima),
   // qualquer menu/navegação lateral do painel indica sessão autenticada.
-  // 'header' fica de fora: telas de login também têm header/logo.
   const hasMenu = Array.from(document.querySelectorAll('aside, .el-menu, .sidebar, nav')).some(isVisible);
   if (hasMenu) {
     return 'dashboard';
@@ -457,28 +477,40 @@ function detectLoginStage(): LoginStage {
 }
 
 /**
+ * Estágios que, uma vez estáveis, são terminais: o roteador pode agir neles.
+ * 'unknown' NÃO é terminal — a tela ainda pode estar carregando (Cloudflare,
+ * SPA) e evoluir para um dos estágios conhecidos, então continuamos amostrando
+ * até o deadline para não decidir cedo demais.
+ */
+const TERMINAL_LOGIN_STAGES: ReadonlySet<LoginStage> =
+  new Set(['login-form', 'twofa', 'dashboard']);
+
+/**
  * Amostra a tela até o estágio do login estabilizar (ficar o mesmo por um
- * intervalo consecutivo). Isso evita decidir durante um carregamento
- * intermediário (Cloudflare -> login -> 2FA -> dashboard).
+ * intervalo consecutivo) OU o deadline expirar.
+ * - Estágios conhecidos (login-form/twofa/dashboard) retornam assim que ficam
+ *   2500ms estáveis.
+ * - 'unknown' continua sendo amostrado até o deadline; no timeout retorna o
+ *   último valor não-desconhecido (ou 'unknown' se nunca apareceu nada).
  */
 async function waitForLoginStage(page: Page, timeoutMs: number): Promise<LoginStage> {
   const deadline = Date.now() + timeoutMs;
   let current: LoginStage = 'unknown';
   let stableSince: number | null = null;
+  let lastKnown: LoginStage = 'unknown';
   while (Date.now() < deadline) {
     const stage = await page.evaluate(detectLoginStage);
+    if (stage !== 'unknown') lastKnown = stage;
     if (stage !== current || stableSince === null) {
-      // Primeira vez que vemos este estágio (ou a própria primeira leitura):
-      // reinicia o contador de estabilidade em vez de retornar no primeiro ping.
       current = stage;
       stableSince = Date.now();
-    } else if (Date.now() - stableSince >= 2500) {
-      // Mesmo estágio por tempo suficiente consecutivo: ainda rodando.
-      return current;
+    } else if (TERMINAL_LOGIN_STAGES.has(stage) && Date.now() - stableSince >= 2500) {
+      // Estágio conhecido estável por tempo suficiente: decidir.
+      return stage;
     }
     await delay(600);
   }
-  return current;
+  return lastKnown;
 }
 
 /**
@@ -772,13 +804,21 @@ export async function loginToPanel(config: {
       const twoFAState = await handle2FA(page, sessionId);
       await delay(2000);
 
+      // Estado do desafio MAIS RECENTE: 'completed' comprovado limpa uma falha
+      // anterior (permite recuperação entre tentativas); 'failed' marca a atual.
+      // 'not-required' NÃO limpa uma falha pendente — só um 2FA de fato concluído.
+      if (twoFAState === 'completed') {
+        any2FAFailed = false;
+      } else if (twoFAState === 'failed') {
+        any2FAFailed = true;
+      }
+
       // Verifica sucesso: só conta como sucesso se 2FA não falhou e saiu da
       // tela de login/segurança. Um 2FA falho nunca é promovido a sucesso.
       const currentUrl = page.url();
       const stillOnLogin = currentUrl.includes('login');
       const stillOnSecurity = currentUrl.includes('/info/accountSecurity');
       const twoFAFailed = twoFAState === 'failed';
-      if (twoFAFailed) any2FAFailed = true;
       if (!stillOnLogin && !stillOnSecurity && !twoFAFailed) {
         loginSuccessful = true;
       } else {
@@ -828,16 +868,16 @@ export async function loginToPanel(config: {
   }
 
   const finalUrl = page.url();
-  // O sucesso final é decidido pela TELA, não por URL. Um login que concluiu
-  // pelos cookies (reuso) já retornou antes; aqui chegamos só quando passamos
-  // pelo formulário/2FA. Exigimos:
-  //  - nenhuma etapa 2FA falhou (any2FAFailed bloqueia), e
+  // O sucesso final é decidido pela TELA, não por URL. Usa waitForLoginStage
+  // (com estabilização) para não gerar falso-negativo enquanto o dashboard
+  // ainda está montando. Exigimos:
+  //  - nenhuma etapa 2FA pendente/falha no desafio mais recente, e
   //  - a tela final é um dashboard autenticado detectado pelo DOM.
   // Uma tela de Security Account/2FA em qualquer rota, ou 'unknown' não
   // detectado, nunca é promovido a sucesso por engano.
-  const finalStage = await page.evaluate(detectLoginStage);
+  const finalStage = await waitForLoginStage(page, 10000);
   let successful = !any2FAFailed && finalStage === 'dashboard';
-  
+
   if (successful) {
     // Só persiste cookies depois que login e 2FA realmente terminaram.
     await saveCookies(page);
@@ -855,8 +895,11 @@ export async function loginToPanel(config: {
     console.log('  ⏳ Aguardando 30 segundos para login manual...\n');
     await delay(30000);
 
-    const manualUrl = page.url();
-    successful = !manualUrl.includes('login') && !manualUrl.includes('/info/accountSecurity');
+    // No modo manual, também decidimos pela TELA (dashboard) e pela ausência de
+    // 2FA pendente — NUNCA por URL. Assim uma Security Account em outra rota
+    // (inclusive após timeout/código recusado) não é salva como sessão válida.
+    const manualStage = await waitForLoginStage(page, 10000);
+    successful = !any2FAFailed && manualStage === 'dashboard';
     if (!successful) {
       throw new Error('Login manual do StarHome não foi concluído dentro do prazo.');
     }
