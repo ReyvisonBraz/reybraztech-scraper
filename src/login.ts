@@ -410,20 +410,25 @@ function detectLoginStage(): LoginStage {
       && el.getBoundingClientRect().height > 0 && el.getBoundingClientRect().width > 0;
   };
 
-  // 2FA / Security Account: input de código visível (placeholder code/código)
-  // ou diálogo/modal de verificação visível com input.
+  // Sinal positivo de 2FA: input de código visível (placeholder code/código).
+  // Usa o mesmo critério específico do handle2FA; um diálogo genérico com
+  // qualquer input (filtro/edição/busca) NÃO configura 2FA sozinho.
+  const visibleInputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
+  const isCodeInput = (el: HTMLInputElement) => {
+    const ph = (el.getAttribute('placeholder') || '').toLowerCase();
+    return ph.includes('code') || ph.includes('código') || ph.includes('codigo');
+  };
+  if (visibleInputs.some(isCodeInput)) {
+    return 'twofa';
+  }
+
+  // Diálogo/modal que, além de visível, contém um INPUT DE CÓDIGO visível é um
+  // desafio 2FA. Não basta ter input qualquer.
   const dialogs = Array.from(document.querySelectorAll('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal'));
   for (const d of dialogs) {
     if (!isVisible(d)) continue;
-    const hasInput = Array.from(d.querySelectorAll('input')).some(isVisible);
-    if (hasInput) return 'twofa';
-  }
-  const codeInputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
-  for (const input of codeInputs) {
-    const ph = (input.getAttribute('placeholder') || '').toLowerCase();
-    if (ph.includes('code') || ph.includes('código') || ph.includes('codigo')) {
-      return 'twofa';
-    }
+    const hasCodeField = Array.from(d.querySelectorAll('input')).filter(isVisible).some(isCodeInput);
+    if (hasCodeField) return 'twofa';
   }
 
   // Login form: campo de senha visível (com 2+ inputs = conta/senha/captcha).
@@ -491,6 +496,11 @@ export async function loginToPanel(config: {
 
   // Identifica esta tentativa de login; usado pelo canal 2FA (memória/arquivo).
   const sessionId = new2FASessionId();
+
+  // Sinaliza que ALGUMA etapa 2FA falhou (timeout/código recusado). Marcado só
+  // quando o 2FA é realmente exigido e não conclui. Proíbe sucesso/cookies:
+  // nenhum caminho que observou 2FA pendente pode virar "login ok" por URL.
+  let any2FAFailed = false;
 
   const isLinux = process.platform === 'linux';
   let chromePath: string | undefined;
@@ -661,6 +671,11 @@ export async function loginToPanel(config: {
       console.log('  ✅ 2FA concluído a partir da sessão por cookies.');
       return { browser, page };
     }
+    // 2FA exigido mas não concluído (timeout/código recusado/confirm. pendente):
+    // marca para proibir sucesso por URL no fechamento, antes de tentar o form.
+    if (twoFAState === 'failed') {
+      any2FAFailed = true;
+    }
     // Se falhou, segue para o formulário de login.
   }
 
@@ -693,7 +708,6 @@ export async function loginToPanel(config: {
   let loginSuccessful = false;
   let loginAttempts = 0;
   const maxLoginAttempts = 5; // Tenta até 5 vezes antes do fallback manual
-  let any2FAFailed = false; // Qualquer tentativa com 2FA falho proíbe sucesso/cookies
 
   while (!loginSuccessful && loginAttempts < maxLoginAttempts) {
     loginAttempts++;
@@ -814,8 +828,15 @@ export async function loginToPanel(config: {
   }
 
   const finalUrl = page.url();
-  let successful = !any2FAFailed && (loginSuccessful
-    || (!finalUrl.includes('login') && !finalUrl.includes('/info/accountSecurity')));
+  // O sucesso final é decidido pela TELA, não por URL. Um login que concluiu
+  // pelos cookies (reuso) já retornou antes; aqui chegamos só quando passamos
+  // pelo formulário/2FA. Exigimos:
+  //  - nenhuma etapa 2FA falhou (any2FAFailed bloqueia), e
+  //  - a tela final é um dashboard autenticado detectado pelo DOM.
+  // Uma tela de Security Account/2FA em qualquer rota, ou 'unknown' não
+  // detectado, nunca é promovido a sucesso por engano.
+  const finalStage = await page.evaluate(detectLoginStage);
+  let successful = !any2FAFailed && finalStage === 'dashboard';
   
   if (successful) {
     // Só persiste cookies depois que login e 2FA realmente terminaram.
