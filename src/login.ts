@@ -34,16 +34,6 @@ function normalizeUiText(text: string): string {
     .toLowerCase();
 }
 
-function isSendCodeLabel(text: string): boolean {
-  const normalized = normalizeUiText(text);
-  return normalized.includes('send')
-    || normalized.includes('enviar')
-    || normalized.includes('get code')
-    || normalized.includes('obter codigo')
-    || normalized.includes('发送')
-    || normalized.includes('获取验证码');
-}
-
 async function waitForCodeDispatchFeedback(page: Page): Promise<boolean> {
   try {
     await page.waitForFunction(() => {
@@ -116,57 +106,48 @@ async function loadCookies(page: Page): Promise<boolean> {
 async function handle2FA(page: Page, sessionId: string): Promise<'not-required' | 'completed' | 'failed'> {
   await delay(2000);
 
-  // Procura o botão de enviar código ou o input de código para confirmar que é realmente 2FA
-  // SINAIS ALINHADOS ao classificador (detectLoginStage): placeholder code/código/verification
-  // OU classe `.code-input`. Um input de código sozinho nesta página já roteia para waitFor2FACode.
-  let has2FAElements = false;
-  
-  const detectButtons = await page.$$('button, span.text-primary, a.text-primary');
-  for (const btn of detectButtons) {
-    const text = await btn.evaluate((el: Element) => el.textContent || '');
-    if (isSendCodeLabel(text)) {
-      const isVisible = await btn.evaluate((el) => {
-        const style = window.getComputedStyle(el);
-        return style.display !== 'none' && style.visibility !== 'hidden' && el.getBoundingClientRect().height > 0;
-      });
-      if (isVisible) {
-        has2FAElements = true;
-        break;
-      }
-    }
+  // Detecta, com os MESMOS sinais do classificador (TWOFA_SIGNALS), o que há:
+  //  - awaitCode: já há um campo de código visível (fase de digitação).
+  //  - needDispatch: há um controle visível de SOLICITAR código (fase de envio).
+  const { codePlaceholders, sendTerms } = TWOFA_SIGNALS;
+
+  const visibleCodeInputs = await page.$$('input');
+  let awaitCode = false;
+  for (const input of visibleCodeInputs) {
+    const visible = await input.evaluate((el) => {
+      const s = window.getComputedStyle(el);
+      return s.display !== 'none' && s.visibility !== 'hidden' && el.getBoundingClientRect().height > 0;
+    });
+    if (!visible) continue;
+    const isCode = await input.evaluate((el, terms) => {
+      const ph = (el.getAttribute('placeholder') || '').toLowerCase();
+      return terms.some((t: string) => ph.includes(t)) || !!el.closest('.code-input');
+    }, codePlaceholders);
+    if (isCode) { awaitCode = true; break; }
   }
 
-  if (!has2FAElements) {
-     const inputs = await page.$$('input');
-     for (const input of inputs) {
-       const isVisible = await input.evaluate((el) => {
-         const style = window.getComputedStyle(el);
-         return style.display !== 'none' && style.visibility !== 'hidden' && el.getBoundingClientRect().height > 0;
-       });
-       if (isVisible) {
-         const isCode = await input.evaluate((el) => {
-           const ph = (el.getAttribute('placeholder') || '').toLowerCase();
-           return ph.includes('code') || ph.includes('código') || ph.includes('verification')
-             || !!el.closest('.code-input');
-         });
-         if (isCode) {
-           has2FAElements = true;
-           break;
-         }
-       }
-     }
+  const sendButtons = await page.$$('button, span.text-primary, a.text-primary');
+  let needDispatch = false;
+  for (const btn of sendButtons) {
+    const text = await btn.evaluate((el: Element) => el.textContent || '');
+    if (!isSendCodeLabel(text)) continue;
+    const visible = await btn.evaluate((el) => {
+      const s = window.getComputedStyle(el);
+      return s.display !== 'none' && s.visibility !== 'hidden' && el.getBoundingClientRect().height > 0;
+    });
+    if (visible) { needDispatch = true; break; }
   }
 
   const url = page.url();
-  let isSecurityPage = url.includes('/info/accountSecurity');
+  const isSecurityPage = url.includes('/info/accountSecurity');
 
-  if (!has2FAElements && !isSecurityPage) {
+  // Ainda sem nenhum sinal de 2FA: não é necessário (ou apenas tela de dashboard
+  // que parece security page).
+  if (!awaitCode && !needDispatch && !isSecurityPage) {
     return 'not-required';
   }
-
-  if (!has2FAElements) {
-     // Even if it's security page, if no 2FA elements are visible, it was probably just a dashboard that looks like security page
-     return 'not-required';
+  if (!awaitCode && !needDispatch) {
+    return 'not-required';
   }
 
   console.log('\n  🔒 Verificação de 2FA detectada! (Dispositivo / Navegador desconhecido)');
@@ -206,47 +187,52 @@ async function handle2FA(page: Page, sessionId: string): Promise<'not-required' 
     console.log('  ⚠️ Não foi possível selecionar Email automaticamente (ou já estava selecionado).');
   }
 
-  // PASSO 2: Clica no botão "Send" para o sistema disparar o e-mail
-  let sendClicked = false;
-  const allButtons = await page.$$('button, span.text-primary, a.text-primary');
-  for (const btn of allButtons) {
-    const text = await btn.evaluate((el: Element) => el.textContent || '');
-    if (isSendCodeLabel(text)) {
-      const isClickable = await btn.evaluate((el: any) => {
-        const s = window.getComputedStyle(el);
-        const clickable = el.closest('button, a') || el;
-        return s.display !== 'none'
-          && s.visibility !== 'hidden'
-          && el.getBoundingClientRect().height > 0
-          && !clickable.disabled
-          && clickable.getAttribute('aria-disabled') !== 'true';
-      });
-      if (isClickable) {
-        await btn.evaluate((el: any) => {
+  // PASSO 2: Disparar o envio do código — SÓ se ainda não há um campo de código.
+  // Estágio "awaiting-code" (código já enviado/modal reaberto) pula direto para a
+  // espera; evita retornar failed por exigir um botão Send que não existe.
+  let dispatchConfirmed = true;
+  if (!awaitCode && needDispatch) {
+    let sendClicked = false;
+    const allButtons = await page.$$('button, span.text-primary, a.text-primary');
+    for (const btn of allButtons) {
+      const text = await btn.evaluate((el: Element) => el.textContent || '');
+      if (isSendCodeLabel(text)) {
+        const isClickable = await btn.evaluate((el: any) => {
+          const s = window.getComputedStyle(el);
           const clickable = el.closest('button, a') || el;
-          clickable.scrollIntoView({ block: 'center', inline: 'center' });
-          clickable.click();
+          return s.display !== 'none'
+            && s.visibility !== 'hidden'
+            && el.getBoundingClientRect().height > 0
+            && !clickable.disabled
+            && clickable.getAttribute('aria-disabled') !== 'true';
         });
-        console.log('  📤 Clique no botão de envio do código acionado.');
-        sendClicked = true;
-        break;
+        if (isClickable) {
+          await btn.evaluate((el: any) => {
+            const clickable = el.closest('button, a') || el;
+            clickable.scrollIntoView({ block: 'center', inline: 'center' });
+            clickable.click();
+          });
+          console.log('  📤 Clique no botão de envio do código acionado.');
+          sendClicked = true;
+          break;
+        }
       }
     }
-  }
 
-  if (!sendClicked) {
-    console.log('  ❌ Botão de envio do código não foi encontrado ou estava desabilitado.');
-    await sendTelegramMessage(
-      '❌ <b>Não foi possível solicitar o código 2FA.</b>\n\n' +
-      'O botão de envio do StarHome não foi encontrado ou estava desabilitado. O job será encerrado sem afirmar que o e-mail foi enviado.'
-    ).catch(() => {});
-    return 'failed';
-  }
+    if (!sendClicked) {
+      console.log('  ❌ Botão de envio do código não foi encontrado ou estava desabilitado.');
+      await sendTelegramMessage(
+        '❌ <b>Não foi possível solicitar o código 2FA.</b>\n\n' +
+        'O botão de envio do StarHome não foi encontrado ou estava desabilitado. O job será encerrado sem afirmar que o e-mail foi enviado.'
+      ).catch(() => {});
+      return 'failed';
+    }
 
-  const dispatchConfirmed = await waitForCodeDispatchFeedback(page);
-  console.log(dispatchConfirmed
-    ? '  ✅ O painel exibiu uma confirmação após solicitar o código.'
-    : '  ⚠️ Clique acionado, mas o painel não exibiu confirmação verificável de envio.');
+    dispatchConfirmed = await waitForCodeDispatchFeedback(page);
+    console.log(dispatchConfirmed
+      ? '  ✅ O painel exibiu uma confirmação após solicitar o código.'
+      : '  ⚠️ Clique acionado, mas o painel não exibiu confirmação verificável de envio.');
+  }
 
   // PASSO 3: Notifica pelo Telegram. O código deve ser entregue pelo Console Admin.
   await sendTelegramMessage(
@@ -409,109 +395,115 @@ type LoginStage = 'login-form' | 'twofa' | 'dashboard' | 'unknown';
  * Lê o DOM atual e decide o estágio do login pela TELA, não pela URL.
  * Mantido como função pura (invocada dentro de page.evaluate).
  */
-// Predicados de sinal 2FA compartilhados entre o classificador e o handle2FA.
-// Vivem no escopo do módulo mas são reimplementados como texto dentro de
-// page.evaluate (ver detectLoginStage). Mantenha ALINHADOS com o handle2FA.
+// ---------------------------------------------------------------------------
+// Sinais de 2FA/segurança — FONTE ÚNICA DE VERDADE, compartilhada entre o
+// classificador DOM (serializado para page.evaluate) e o handler Node.
+// Toda correspondência textual de "campo de código" e "controle de solicitar"
+// usa estes arrays; nunca duplique termos fora daqui.
+// ---------------------------------------------------------------------------
 
-const SEND_CODE_TERMS = ['send', 'enviar', 'get code', 'obter codigo', '获取验证码', '发送'];
-const CONFIRM_CODE_TERMS = ['verify', 'confirm', 'confirmar', '确认'];
+const TWOFA_SIGNALS = {
+  // Placeholders que identificam um campo onde o CÓDIGO 2FA deve ser digitado.
+  // "verification" pode ser captcha do login; por isso a precedência ao
+  // formulário com senha deve vir ANTES (ver detectLoginStage).
+  codePlaceholders: ['code', 'codigo', 'verification'],
+  // Placeholders de CAMPO DE CONTA do formulário de login (identificam o login
+  // real: conta + senha + captcha). Um campo de código sozinho, sem conta, é 2FA.
+  accountPlaceholders: ['user', 'usuario', 'username', 'account', 'conta', 'email', 'phone', 'celular', '账号', '用户名', '手机号', '邮箱'],
+  // Apenas termos de SOLICITAR o envio do código (disparo inicial). Não inclui
+  // verify/confirmar/确认, que são a etapa de CONFIRMAR o código digitado.
+  sendTerms: ['send', 'obter codigo', '获取验证码', '发送', 'enviar', 'get code'],
+} as const;
 
-function isVisibleInDom(el: Element): boolean {
-  const s = window.getComputedStyle(el);
-  return s.display !== 'none' && s.visibility !== 'hidden'
-    && el.getBoundingClientRect().height > 0 && el.getBoundingClientRect().width > 0;
-}
-
-/**
- * Reconhece se um input é um campo de código 2FA: pelo placeholder (ex.
- * "code", "código", "verification") OU pela classe `.code-input`. ALINHADO à
- * detecção inicial do handle2FA — qualquer sinal aqui também faz o handler
- * entrar em waitFor2FACode.
- */
-function isCodeInputField(el: HTMLInputElement): boolean {
-  const ph = normalizeUiText(el.getAttribute('placeholder') || '');
-  return ph.includes('code') || ph.includes('codigo') || ph.includes('verification')
-    || !!el.closest('.code-input');
-}
+type TwofaSignals = typeof TWOFA_SIGNALS;
 
 /**
- * Reconhece um controle de SOLICITAR código (início do desafio) — os mesmos
- * termos do handle2FA. Não inclui confirmação (verify/confirmar/确认), que só
- * é válida acompanhada de um campo de código.
+ * Reconhece um controle de SOLICITAR código (início do desafio), pelos termos
+ * de envio. Usado no lado Node (handle2FA) com os mesmos sinais do classificador.
  */
-function isRequestCodeControl(el: Element): boolean {
-  const t = normalizeUiText(el.textContent || '');
-  return SEND_CODE_TERMS.some(term => t.includes(term));
+function isSendCodeLabel(text: string): boolean {
+  const normalized = normalizeUiText(text);
+  return TWOFA_SIGNALS.sendTerms.some(term => normalized.includes(term));
 }
 
 /**
  * Lê o DOM atual e decide o estágio do login pela TELA, não pela URL.
- * Mantido como função pura; inclui os predicados de sinal 2FA inline porque
- * page.evaluate serializa esta função sem o escopo do módulo.
+ * Os sinais são passados como parâmetro serializável (page.evaluate(detectLoginStage, TWOFA_SIGNALS))
+ * para que o mesmo vocabulário do handler seja usado — os predicados são
+ * definidos AQUI DENTRO (auto-contidos), porque page.evaluate serializa só o
+ * corpo desta função, sem o escopo do módulo.
  */
-function detectLoginStage(): LoginStage {
+function detectLoginStage(signals: TwofaSignals): LoginStage {
+  const { codePlaceholders, accountPlaceholders, sendTerms } = signals;
   const isVisible = (el: Element) => {
     const s = window.getComputedStyle(el);
     return s.display !== 'none' && s.visibility !== 'hidden'
       && el.getBoundingClientRect().height > 0 && el.getBoundingClientRect().width > 0;
   };
   const norm = (t: string) => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
-  const isCodeInput = (el: HTMLInputElement) => {
-    const ph = norm(el.getAttribute('placeholder') || '');
-    return ph.includes('code') || ph.includes('codigo') || ph.includes('verification')
-      || !!el.closest('.code-input');
-  };
-  const isRequestSend = (el: Element) => {
-    const t = norm(el.textContent || '');
-    return ['send', 'enviar', 'get code', 'obter codigo', '获取验证码', '发送'].some(x => t.includes(x));
-  };
+  const isCodeInput = (el: HTMLInputElement) =>
+    codePlaceholders.some(t => norm(el.getAttribute('placeholder') || '').includes(t))
+    || !!el.closest('.code-input');
+  const isAccountInput = (el: HTMLInputElement) =>
+    accountPlaceholders.some(t => norm(el.getAttribute('placeholder') || '').includes(t));
+  const isSendCtrl = (el: Element) =>
+    sendTerms.some(t => norm(el.textContent || '').includes(t));
   const dialogs = Array.from(document.querySelectorAll('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal')).filter(isVisible);
   const visibleInputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
 
   // 1) MAIOR precedência: dialog/modal 2FA visível com sinal específico
-  //    (campo de código OU botão de solicitar). Modal 2FA sobre o formulário
+  //    (campo de código OU controle de solicitar). Modal 2FA sobre o formulário
   //    ainda visível é twofa, NÃO login-form.
   for (const d of dialogs) {
     const dCode = Array.from(d.querySelectorAll('input')).filter(isVisible).some(isCodeInput);
-    const dSend = Array.from(d.querySelectorAll('button, span.text-primary, a.text-primary')).some(el => isVisible(el) && isRequestSend(el));
+    const dSend = Array.from(d.querySelectorAll('button, span.text-primary, a.text-primary')).some(el => isVisible(el) && isSendCtrl(el));
     if (dCode || dSend) return 'twofa';
   }
 
-  // Campo de código na página (tela de Security Account) tem precedência sobre
-  // um campo de senha global: se há input de código, é 2FA de digitação.
-  if (visibleInputs.some(isCodeInput)) {
-    return 'twofa';
-  }
-
-  // Tela cheia de Security com botão de SOLICITAR código. Usa visibilidade do
-  // menu (não sua inexistência física no DOM): sidebar oculto não mascara o 2FA.
-  const hasVisibleMenu = Array.from(document.querySelectorAll('aside, .el-menu, .sidebar, nav')).some(isVisible);
-  const hasVisibleSend = Array.from(document.querySelectorAll('button, span.text-primary, a.text-primary'))
-    .some(el => isVisible(el) && isRequestSend(el));
-  if (hasVisibleSend && !hasVisibleMenu) {
-    return 'twofa';
-  }
-
-  // 2) Login form: senha visível DENTRO de um container de formulário de login,
-  //    com os campos de conta/captcha — não um campo de senha em qualquer lugar.
+  // 2) Login form COMPLETO: CONTA + senha + captcha. Tem precedência sobre um
+  //    placeholder genérico "code/verification": um captcha do login NÃO é 2FA.
+  //    Exige um campo de CONTA + senha DENTRO do container. Um 2FA de Security
+  //    Account (senha + código, sem campo de conta) NÃO entra aqui.
   const loginForm = document.querySelector('.login-form, .el-form, form');
   if (loginForm) {
     const formInputs = Array.from(loginForm.querySelectorAll('input')).filter(isVisible);
     const hasPass = formInputs.some(i => i.type === 'password' || i.getAttribute('type') === 'password');
-    const hasAccountOrCaptcha = formInputs.some(i => i.type === 'text' || i.getAttribute('placeholder') || '');
-    if (hasPass && hasAccountOrCaptcha) return 'login-form';
+    const hasAccount = formInputs.some(i => isAccountInput(i));
+    if (hasPass && hasAccount) return 'login-form';
   }
 
-  // Formulário de login em montagem: vários inputs de texto + texto de login.
+  // 2b) Query independente mesmo sem container 'form': conta + senha na página.
+  if (visibleInputs.some(i => i.type === 'password' || i.getAttribute('type') === 'password')
+      && visibleInputs.some(isAccountInput)) {
+    return 'login-form';
+  }
+
+  // 3) Input de código, FORA de um formulário de login (tela de digitação do 2FA).
+  //    Aqui um placeholder "code/código/verification" sem senha no container é 2FA.
+  if (visibleInputs.some(isCodeInput)) {
+    return 'twofa';
+  }
+
+  // 4) Etapa Send de Security Account (tela cheia, ainda sem input de código):
+  //    controle visível de solicitar código no conteúdo central decide 2FA mesmo
+  //    com sidebar visível. Sem esse controle, o dashboard só volta abaixo.
+  const hasVisibleSendArea = Array.from(document.querySelectorAll('button, span.text-primary, a.text-primary'))
+    .some(el => isVisible(el) && isSendCtrl(el));
+  if (hasVisibleSendArea) {
+    return 'twofa';
+  }
+
+  // 5) Formulário de login em montagem: vários inputs de texto + texto de login.
   const textInputs = visibleInputs.filter(el => el.type === 'text' || el.tagName === 'INPUT');
   if (textInputs.length >= 2) {
     const loginText = norm(document.body.innerText || '');
-    if (loginText.includes('login') || document.querySelector('.login-form, .el-form, form')) {
+    if (loginText.includes('login') || document.querySelector('.login-form, .el-form')) {
       return 'login-form';
     }
   }
 
-  // 3) Dashboard: sem formulário de login nem 2FA, com menu lateral real.
+  // 6) Dashboard: sem formulário de login nem 2FA, com menu lateral real.
+  const hasVisibleMenu = Array.from(document.querySelectorAll('aside, .el-menu, .sidebar, nav')).some(isVisible);
   if (hasVisibleMenu) {
     return 'dashboard';
   }
@@ -542,7 +534,7 @@ async function waitForLoginStage(page: Page, timeoutMs: number): Promise<LoginSt
   let current: LoginStage = 'unknown';
   let stableSince: number | null = null;
   while (Date.now() < deadline) {
-    const stage = await page.evaluate(detectLoginStage);
+    const stage = await page.evaluate(detectLoginStage, TWOFA_SIGNALS);
     if (stage !== current || stableSince === null) {
       current = stage;
       stableSince = Date.now();
@@ -951,6 +943,9 @@ export async function loginToPanel(config: {
     if (!successful) {
       throw new Error('Login manual do StarHome não foi concluído dentro do prazo.');
     }
+    // Aceito manualmente: registra o estado externo como aceito (sai de
+    // 'rejected' gravado antes de oferecer a janela), simétrico ao sucesso auto.
+    set2FAState(sessionId, 'accepted');
     await saveCookies(page);
   }
 
