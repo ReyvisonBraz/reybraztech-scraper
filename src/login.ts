@@ -565,7 +565,12 @@ export async function loginToPanel(config: {
   }
 
   if (alreadyLoggedIn) {
-    console.log('  ✅ Já autenticado via cookies salvos!');
+    console.log('  ✅ Já autenticado via cookies salvos! (reuso de sessão, sem 2FA)');
+    sendTelegramMessage(
+      '✅ <b>Sessão reutilizada</b>\n\n' +
+      'O scraper já estava autenticado no painel (login recente ou sessão que não expirou), ' +
+      'então prosseguiu <b>sem 2FA</b> nesta operação.'
+    ).catch(() => {});
     return { browser, page };
   }
 
