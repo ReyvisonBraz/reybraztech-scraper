@@ -391,6 +391,88 @@ async function waitForChallengeToClear(page: Page, timeoutMs: number): Promise<b
 }
 
 /**
+ * Estágios possíveis da tela de login/autenticação do painel.
+ *  - 'login-form' — formulário de credenciais (conta + senha + captcha)
+ *  - 'twofa'      — desafio de Security Account / 2FA (input de código)
+ *  - 'dashboard'  — sessão autenticada (sem formulário nem 2FA)
+ *  - 'unknown'    — tela ainda não identificada (carregando/Cloudflare)
+ */
+type LoginStage = 'login-form' | 'twofa' | 'dashboard' | 'unknown';
+
+/**
+ * Lê o DOM atual e decide o estágio do login pela TELA, não pela URL.
+ * Mantido como função pura (invocada dentro de page.evaluate).
+ */
+function detectLoginStage(): LoginStage {
+  const isVisible = (el: Element) => {
+    const s = window.getComputedStyle(el);
+    return s.display !== 'none' && s.visibility !== 'hidden'
+      && el.getBoundingClientRect().height > 0 && el.getBoundingClientRect().width > 0;
+  };
+
+  // 2FA / Security Account: input de código visível (placeholder code/código)
+  // ou diálogo/modal de verificação visível com input.
+  const dialogs = Array.from(document.querySelectorAll('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal'));
+  for (const d of dialogs) {
+    if (!isVisible(d)) continue;
+    const hasInput = Array.from(d.querySelectorAll('input')).some(isVisible);
+    if (hasInput) return 'twofa';
+  }
+  const codeInputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
+  for (const input of codeInputs) {
+    const ph = (input.getAttribute('placeholder') || '').toLowerCase();
+    if (ph.includes('code') || ph.includes('código') || ph.includes('codigo')) {
+      return 'twofa';
+    }
+  }
+
+  // Login form: campo de senha visível (com 2+ inputs = conta/senha/captcha).
+  const passInputs = Array.from(document.querySelectorAll('input[type="password"]')).filter(isVisible);
+  const textInputs = Array.from(document.querySelectorAll('input[type="text"], input.el-input__inner, input.ant-input')).filter(isVisible);
+  if (passInputs.length > 0) {
+    return 'login-form';
+  }
+  if (textInputs.length >= 2) {
+    // Pode ser a tela de login sem senha visível ainda renderizada.
+    const loginText = (document.body.innerText || '').toLowerCase();
+    if (loginText.includes('login') || document.querySelector('.login-form, .el-form')) {
+      return 'login-form';
+    }
+  }
+
+  // Dashboard: há inputs mas nenhum formulário de login nem 2FA — assume
+  // autenticado se houver navegação/menu com opções do painel.
+  const hasMenu = Array.from(document.querySelectorAll('aside, .el-menu, nav, header, .sidebar')).some(isVisible);
+  if (hasMenu && codeInputs.length === 0) {
+    return 'dashboard';
+  }
+
+  return 'unknown';
+}
+
+/**
+ * Amostra a tela até o estágio do login estabilizar (ficar o mesmo por um
+ * intervalo consecutivo). Isso evita decidir durante um carregamento
+ * intermediário (Cloudflare -> login -> 2FA -> dashboard).
+ */
+async function waitForLoginStage(page: Page, timeoutMs: number): Promise<LoginStage> {
+  const deadline = Date.now() + timeoutMs;
+  let current: LoginStage = 'unknown';
+  let stableSince = 0;
+  while (Date.now() < deadline) {
+    const stage = await page.evaluate(detectLoginStage);
+    if (stage !== current) {
+      current = stage;
+      stableSince = Date.now();
+    } else if (Date.now() - stableSince >= 2500) {
+      return current;
+    }
+    await delay(600);
+  }
+  return current;
+}
+
+/**
  * Faz login no painel ResellerSystem.
  */
 export async function loginToPanel(config: {
@@ -549,23 +631,16 @@ export async function loginToPanel(config: {
     console.log('  ⚠️ Cloudflare challenge pode ainda estar ativo, tentando prosseguir...');
   });
 
-  // Verifica PRIMEIRO se cookies já estão válidos (caminho rápido).
-  // Exclui /info/accountSecurity: sessão conhecida que voltou a exigir 2FA
-  // NÃO deve ser tratada como já logada.
-  let alreadyLoggedIn = false;
-  try {
-    await page.waitForFunction(
-      () => !window.location.href.includes('login')
-          && !window.location.href.includes('/info/accountSecurity'),
-      { timeout: 8000, polling: 500 }
-    );
-    alreadyLoggedIn = true;
-  } catch {
-    // Ainda no login ou em /info/accountSecurity — precisa autenticar/2FA
-  }
+  // Verifica PRIMEIRO o estágio real da tela (não a URL). A decisão de
+  // 'já autenticado' não pode vir de checagem de URL: quando a sessão cai e o
+  // painel volta para a tela de Security Account/2FA, a URL pode não conter
+  // 'login' nem '/info/accountSecurity' e o fast path assumiria logado sem
+  // detectar o 2FA pendente. Aqui lemos o DOM, identificamos o estágio e
+  // aguardamos a tela estabilizar antes de decidir.
+  const stage = await waitForLoginStage(page, 15000);
 
-  if (alreadyLoggedIn) {
-    console.log('  ✅ Já autenticado via cookies salvos! (reuso de sessão, sem 2FA)');
+  if (stage === 'dashboard') {
+    console.log('  ✅ Já autenticado (tela de dashboard) — reuso de sessão, sem 2FA');
     sendTelegramMessage(
       '✅ <b>Sessão reutilizada</b>\n\n' +
       'O scraper já estava autenticado no painel (login recente ou sessão que não expirou), ' +
@@ -574,9 +649,9 @@ export async function loginToPanel(config: {
     return { browser, page };
   }
 
-  // Cookies levaram ao desafio /info/accountSecurity: trata o 2FA antes de
-  // seguir para o formulário (mesmo fluxo centralizado de um login novo).
-  if (page.url().includes('/info/accountSecurity')) {
+  // Tela de Security Account/2FA reconhecida por leitura do DOM: trata o 2FA
+  // antes de seguir para o formulário (mesmo fluxo centralizado de um login novo).
+  if (stage === 'twofa') {
     const twoFAState = await handle2FA(page, sessionId);
     if (twoFAState === 'completed') {
       console.log('  ✅ 2FA concluído a partir da sessão por cookies.');
