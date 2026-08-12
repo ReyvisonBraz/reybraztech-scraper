@@ -440,10 +440,11 @@ function detectLoginStage(): LoginStage {
     }
   }
 
-  // Dashboard: há inputs mas nenhum formulário de login nem 2FA — assume
-  // autenticado se houver navegação/menu com opções do painel.
-  const hasMenu = Array.from(document.querySelectorAll('aside, .el-menu, nav, header, .sidebar')).some(isVisible);
-  if (hasMenu && codeInputs.length === 0) {
+  // Dashboard: sem formulário de login nem 2FA (que já retornaram acima),
+  // qualquer menu/navegação lateral do painel indica sessão autenticada.
+  // 'header' fica de fora: telas de login também têm header/logo.
+  const hasMenu = Array.from(document.querySelectorAll('aside, .el-menu, .sidebar, nav')).some(isVisible);
+  if (hasMenu) {
     return 'dashboard';
   }
 
@@ -458,13 +459,16 @@ function detectLoginStage(): LoginStage {
 async function waitForLoginStage(page: Page, timeoutMs: number): Promise<LoginStage> {
   const deadline = Date.now() + timeoutMs;
   let current: LoginStage = 'unknown';
-  let stableSince = 0;
+  let stableSince: number | null = null;
   while (Date.now() < deadline) {
     const stage = await page.evaluate(detectLoginStage);
-    if (stage !== current) {
+    if (stage !== current || stableSince === null) {
+      // Primeira vez que vemos este estágio (ou a própria primeira leitura):
+      // reinicia o contador de estabilidade em vez de retornar no primeiro ping.
       current = stage;
       stableSince = Date.now();
     } else if (Date.now() - stableSince >= 2500) {
+      // Mesmo estágio por tempo suficiente consecutivo: ainda rodando.
       return current;
     }
     await delay(600);
