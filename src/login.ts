@@ -201,16 +201,24 @@ async function handle2FA(page: Page, sessionId: string): Promise<'not-required' 
         const isClickable = await btn.evaluate((el: any, securityTerms: readonly string[]) => {
           const s = window.getComputedStyle(el);
           const clickable = el.closest('button, a') || el;
-          const region = el.closest(
-            '.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal, main, .main, .content, .el-main, section, .container, .account-security, .security-account'
-          );
-          if (!region) return false;
-          const regionText = (region.textContent || '')
-            .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase().replace(/\s+/g, '');
-          const maskedEmail = /(?:[a-z0-9._%+-]*\*{2,}[a-z0-9._%+-]*@|@\*{2,})/i.test(regionText);
-          const securityHeading = securityTerms.some(term => regionText.includes(term.replace(/\s+/g, '')));
-          return (maskedEmail || securityHeading)
+          const regionSelector = '.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal, main, .main, .content, .el-main, section, .container, .account-security, .security-account';
+          let ancestor: Element | null = el;
+          let belongsToVerifiedRegion = false;
+          while (ancestor) {
+            if (ancestor.matches(regionSelector)) {
+              const regionText = (ancestor.textContent || '')
+                .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+                .toLowerCase().replace(/\s+/g, '');
+              const maskedEmail = /(?:[a-z0-9._%+-]*\*{2,}[a-z0-9._%+-]*@|@\*{2,})/i.test(regionText);
+              const securityHeading = securityTerms.some(term => regionText.includes(term.replace(/\s+/g, '')));
+              if (maskedEmail || securityHeading) {
+                belongsToVerifiedRegion = true;
+                break;
+              }
+            }
+            ancestor = ancestor.parentElement;
+          }
+          return belongsToVerifiedRegion
             && s.display !== 'none'
             && s.visibility !== 'hidden'
             && el.getBoundingClientRect().height > 0
