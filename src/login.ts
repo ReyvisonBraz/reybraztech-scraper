@@ -120,6 +120,10 @@ async function handle2FA(page: Page, sessionId: string): Promise<'not-required' 
     return 'not-required';
   }
 
+  // Registra a evidência ANTES de qualquer clique ou notificação. Assim o
+  // log preserva exatamente a tela que autorizou a abertura do protocolo 2FA.
+  await logScreenEvidence(page, '2fa-confirmado');
+
   // Estamos em um desafio 2FA confirmado. Descobre se há campo de código já
   // aberto (awaitingCode) e preserva o handle exato para a inserção.
   const allInputs = await page.$$('input');
@@ -194,15 +198,25 @@ async function handle2FA(page: Page, sessionId: string): Promise<'not-required' 
     for (const btn of allButtons) {
       const text = await btn.evaluate((el: Element) => el.textContent || '');
       if (isSendCodeLabel(text)) {
-        const isClickable = await btn.evaluate((el: any) => {
+        const isClickable = await btn.evaluate((el: any, securityTerms: readonly string[]) => {
           const s = window.getComputedStyle(el);
           const clickable = el.closest('button, a') || el;
-          return s.display !== 'none'
+          const region = el.closest(
+            '.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal, main, .main, .content, .el-main, section, .container, .account-security, .security-account'
+          );
+          if (!region) return false;
+          const regionText = (region.textContent || '')
+            .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase().replace(/\s+/g, '');
+          const maskedEmail = /(?:[a-z0-9._%+-]*\*{2,}[a-z0-9._%+-]*@|@\*{2,})/i.test(regionText);
+          const securityHeading = securityTerms.some(term => regionText.includes(term.replace(/\s+/g, '')));
+          return (maskedEmail || securityHeading)
+            && s.display !== 'none'
             && s.visibility !== 'hidden'
             && el.getBoundingClientRect().height > 0
             && !clickable.disabled
             && clickable.getAttribute('aria-disabled') !== 'true';
-        });
+        }, TWOFA_SIGNALS.securityHeadingTerms);
         if (isClickable) {
           await btn.evaluate((el: any) => {
             const clickable = el.closest('button, a') || el;
@@ -401,28 +415,19 @@ async function waitForChallengeToClear(page: Page, timeoutMs: number): Promise<b
  */
 type LoginStage = 'login-form' | 'twofa' | 'dashboard' | 'unknown';
 
-/**
- * Lê o DOM atual e decide o estágio do login pela TELA, não pela URL.
- * Mantido como função pura (invocada dentro de page.evaluate).
- */
 // ---------------------------------------------------------------------------
 // Sinais de 2FA/segurança — FONTE ÚNICA DE VERDADE, compartilhada entre o
-// classificador DOM (serializado para page.evaluate) e o handler Node.
-// Toda correspondência textual de "campo de código" e "controle de solicitar"
-// usa estes arrays; nunca duplique termos fora daqui.
+// mapeador de tela (serializado para page.evaluate) e o handler Node.
+// Toda correspondência textual usa estes arrays; nunca duplique termos fora daqui.
 // ---------------------------------------------------------------------------
 
 const TWOFA_SIGNALS = {
   // Placeholders que identificam um campo onde o CÓDIGO 2FA deve ser digitado.
-  // "verification" pode ser captcha do login; por isso a prova do formulário de
-  // login (estrutura) deve vir ANTES no classificador (ver detectLoginStage).
   codePlaceholders: ['code', 'codigo', 'verification'],
   // Apenas termos de SOLICITAR o envio do código (disparo inicial). Não inclui
   // verify/confirmar/确认, que são a etapa de CONFIRMAR o código digitado.
   sendTerms: ['send', 'obter codigo', '获取验证码', '发送', 'enviar', 'get code'],
-  // Texto de HEADING de área de segurança/verificação. Usado como sinal
-  // COMBINADO com um controle de enviar, DENTRO do mesmo container, para não
-  // deixar um botão genérico ("Send message") virar 2FA no dashboard.
+  // Texto de heading de área de segurança/verificação (Security Account).
   securityHeadingTerms: ['account security', 'security account', 'security settings',
     'twofactor', 'two factor', '2fa', 'verify identity', 'seguranca da conta',
     'autenticacao', '安全账户', '验证', '安全中心'],
@@ -432,7 +437,7 @@ type TwofaSignals = typeof TWOFA_SIGNALS;
 
 /**
  * Reconhece um controle de SOLICITAR código (início do desafio), pelos termos
- * de envio. Usado no lado Node (handle2FA) com os mesmos sinais do classificador.
+ * de envio. Usado no lado Node (handle2FA) com os mesmos sinais do mapeador.
  */
 function isSendCodeLabel(text: string): boolean {
   const normalized = normalizeUiText(text);
@@ -440,14 +445,49 @@ function isSendCodeLabel(text: string): boolean {
 }
 
 /**
- * Lê o DOM atual e decide o estágio do login pela TELA, não pela URL.
- * Tudo é ESCONDIDO A CONTAINERS: um dialog/área de desafio, ou um container de
- * formulário de login. Sinais separados em regiões diferentes não se combinam.
- * Os sinais são passados como parâmetro serializável (page.evaluate(detectLoginStage, TWOFA_SIGNALS))
- * e os predicados são definidos AQUI DENTRO (auto-contidos), porque page.evaluate
- * serializa só o corpo desta função, sem o escopo do módulo.
+ * Snapshot do que a tela REALMENTE contém, com EVIDÊNCIA POSITIVA por item.
+ * O decisor nunca usa "ausência de algo" como prova — cada estágio exige um
+ * sinal concreto observado na página.
  */
-function detectLoginStage(signals: TwofaSignals): LoginStage {
+type ScreenSnapshot = {
+  stage: LoginStage;
+  title: string;
+  headings: string[];
+  hasPasswordInput: boolean;
+  hasLoginForm: boolean;
+  hasDashboardMenu: boolean;
+  dashboardMarkers: string[];
+  bodyTwofaEvidence: {
+    maskedEmail: boolean;
+    hasCodeInput: boolean;
+    hasSendControl: boolean;
+    hasSecurityHeading: boolean;
+  };
+  hasFullPageTwofa: boolean;
+  dialogs: Array<{
+    text: string;
+    hasCodeInput: boolean;
+    maskedEmail: boolean;
+    hasSendControl: boolean;
+    hasSecurityHeading: boolean;
+  }>;
+};
+
+/**
+ * Lê o DOM e mapeia a tela em um snapshot de evidências. Auto-contido
+ * (page.evaluate serializa só o corpo; os sinais chegam por parâmetro).
+ * A classificação NUNCA é por ausência: cada estágio exige um sinal positivo.
+ *
+ * Ordem de decisão:
+ *  1. Dialog/modal visível com evidência de 2FA → 'twofa'
+ *     (campo de código; OU email mascarado "***"; OU Send + heading de
+ *     segurança no mesmo dialog) — o que o usuário descreveu: "pediu código,
+ *     aparece email e ****".
+ *  2. Login form (senha + conta editável + captcha/botão Login) → 'login-form'.
+ *  3. Tela cheia com evidências combinadas de código/email/segurança → 'twofa'.
+ *  4. Shell autenticado do painel (menu real com múltiplos destinos) → 'dashboard'.
+ */
+function mapScreen(signals: TwofaSignals): ScreenSnapshot {
   const { codePlaceholders, sendTerms, securityHeadingTerms } = signals;
   const isVisible = (el: Element) => {
     const s = window.getComputedStyle(el);
@@ -455,11 +495,15 @@ function detectLoginStage(signals: TwofaSignals): LoginStage {
       && el.getBoundingClientRect().height > 0 && el.getBoundingClientRect().width > 0;
   };
   const norm = (t: string) => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+  const trunc = (t: string, n = 300) => t.length > n ? t.slice(0, n) + '…' : t;
   const isCodeInput = (el: HTMLInputElement) =>
     codePlaceholders.some(t => norm(el.getAttribute('placeholder') || '').includes(t))
     || !!el.closest('.code-input');
-  // Campo de CONTA editável: input de texto não-senha, editável (exclui readonly
-  // e o input interno de componentes como .el-select/ant-select) e não-código.
+  // Email mascarado: padrão tipo "j***@gmail.com", "*****@***", "***@***".
+  const hasMaskedEmail = (t: string) => {
+    const compact = t.replace(/\s+/g, '');
+    return /(?:[a-z0-9._%+-]*\*{2,}[a-z0-9._%+-]*@|@\*{2,})/i.test(compact);
+  };
   const isEditableAccountField = (el: HTMLInputElement) => {
     if (el.closest('.el-select, .ant-select')) return false;
     if (el.readOnly || el.disabled) return false;
@@ -473,27 +517,55 @@ function detectLoginStage(signals: TwofaSignals): LoginStage {
     const t = norm(el.textContent || '');
     return t.includes('login') || t.includes('entrar') || t.includes('登入') || t.includes('登录');
   };
-  const dialogs = Array.from(document.querySelectorAll('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal')).filter(isVisible);
 
-  // 1) Dialog/modal 2FA — tudo ESCONDIDO ao dialog. Um dialog é desafio se tem
-  //    campo de código, OU controle de solicitar código combinado com heading de
-  //    segurança no MESMO dialog. Não aceita Send isolado em dialog comum.
-  for (const d of dialogs) {
-    const inDialog = (el: Element) => el.closest('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal') === d;
-    const dCode = Array.from(d.querySelectorAll('input')).filter(isVisible).some(isCodeInput);
+  const title = norm(document.title || '');
+  const headings = Array.from(document.querySelectorAll('h1, h2, h3, .page-title, .el-page-header__title'))
+    .filter(isVisible).map(el => trunc(norm(el.textContent || ''), 120));
+
+  const visibleDialogs = Array.from(document.querySelectorAll('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal')).filter(isVisible);
+  const dialogs = visibleDialogs.map(d => {
     const dText = norm(d.textContent || '');
-    const dHasHeading = securityHeadingTerms.some(t => dText.includes(t));
+    const dCode = Array.from(d.querySelectorAll('input')).filter(isVisible).some(isCodeInput);
     const dSend = Array.from(d.querySelectorAll('button, span.text-primary, a.text-primary'))
-      .some(el => inDialog(el) && isVisible(el) && isSendCtrl(el));
-    if (dCode || (dSend && dHasHeading)) return 'twofa';
-  }
+      .some(el => isVisible(el) && isSendCtrl(el));
+    return {
+      text: trunc(dText, 300),
+      hasCodeInput: dCode,
+      maskedEmail: hasMaskedEmail(dText),
+      hasSendControl: dSend,
+      hasSecurityHeading: securityHeadingTerms.some(t => dText.includes(t)),
+    };
+  });
 
-  // 2) Login form COMPLETO, por ESTRUTURA e AGrupamento: senha + campo de CONTA
-  //    editável (não-senha, não-código, não-readonly, não-select) no MESMO
-  //    container de formulário, com captcha/botão Login. Tem precedência sobre
-  //    placeholder "code/verification": captcha do login não é 2FA. Security
-  //    Account (senha + el-select de método + código) não tem conta editável →
-  //    não entra aqui.
+  const visibleInputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
+  const hasPasswordInput = visibleInputs.some(i => i.type === 'password' || i.getAttribute('type') === 'password');
+  const bodyText = norm(document.body.innerText || '');
+  const bodyTwofaEvidence = {
+    maskedEmail: hasMaskedEmail(bodyText),
+    hasCodeInput: visibleInputs.some(isCodeInput),
+    hasSendControl: Array.from(document.querySelectorAll('button, span.text-primary, a.text-primary'))
+      .some(el => isVisible(el) && isSendCtrl(el)),
+    hasSecurityHeading: securityHeadingTerms.some(t => bodyText.includes(t)),
+  };
+
+  // Em tela cheia, sinais só podem se combinar dentro da MESMA região.
+  // Isso impede, por exemplo, um heading "Security settings" no menu e um
+  // botão "Send message" no conteúdo de virarem um falso 2FA.
+  const challengeAreas = Array.from(document.querySelectorAll(
+    'main, .main, .content, .el-main, section, .container, .account-security, .security-account'
+  )).filter(isVisible);
+  const hasFullPageTwofa = challengeAreas.some(area => {
+    const areaText = norm(area.textContent || '');
+    const areaMaskedEmail = hasMaskedEmail(areaText);
+    const areaHasHeading = securityHeadingTerms.some(t => areaText.includes(t));
+    const areaHasCode = Array.from(area.querySelectorAll('input')).filter(isVisible).some(isCodeInput);
+    const areaHasSend = Array.from(area.querySelectorAll('button, span.text-primary, a.text-primary'))
+      .some(el => isVisible(el) && isSendCtrl(el));
+    return (areaMaskedEmail && (areaHasCode || areaHasSend))
+      || (areaHasHeading && (areaHasCode || areaHasSend));
+  });
+  // Login form completo por ESTRUTURA e agrupamento (senha + conta + captcha/btn).
+  let hasLoginForm = false;
   const formContainers = Array.from(document.querySelectorAll('form, .login-form, .el-form')).filter(isVisible);
   for (const f of formContainers) {
     const inputs = Array.from(f.querySelectorAll('input')).filter(isVisible);
@@ -501,55 +573,104 @@ function detectLoginStage(signals: TwofaSignals): LoginStage {
     const hasAccount = inputs.some(isEditableAccountField);
     const hasCaptcha = inputs.filter(i => i.type === 'text').length >= 2;
     const hasLoginBtn = Array.from(f.querySelectorAll('button, a')).some(el => isVisible(el) && isLoginSubmitBtn(el));
-    if (hasPass && hasAccount && (hasCaptcha || hasLoginBtn)) return 'login-form';
+    if (hasPass && hasAccount && (hasCaptcha || hasLoginBtn)) { hasLoginForm = true; break; }
   }
-
-  // 2b) Mesmo critério de agrupamento, sem container explícito de form, mas com
-  //     senha + conta editável + botão Login na mesma área visível.
-  const pageHasLoginBtn = Array.from(document.querySelectorAll('button, a')).some(el => isVisible(el) && isLoginSubmitBtn(el));
-  if (pageHasLoginBtn) {
-    const visibleInputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
-    const hasPass = visibleInputs.some(i => i.type === 'password' || i.getAttribute('type') === 'password');
-    const hasAccount = visibleInputs.some(isEditableAccountField);
-    if (hasPass && hasAccount) return 'login-form';
-  }
-
-  // 3) Input de código FORA de dialog e FORA de login (tela de digitação 2FA).
-  const visibleInputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
-  if (visibleInputs.some(isCodeInput)) {
-    return 'twofa';
-  }
-
-  // 4) Etapa Send de Security Account em tela cheia (sem input de código ainda):
-  //    controle de SOLICITAR código + heading de segurança no MESMO container de
-  //    área. Exige os DOIS, co-ocorrentes, para não virar 2FA num dashboard com
-  //    um botão "Send message" isolado.
-  const areas = Array.from(document.querySelectorAll('main, .main, .content, .el-main, section, .container')).filter(isVisible);
-  for (const area of areas) {
-    const areaText = norm(area.textContent || '');
-    const hasHeading = securityHeadingTerms.some(t => areaText.includes(t));
-    if (!hasHeading) continue;
-    const areaSend = Array.from(area.querySelectorAll('button, span.text-primary, a.text-primary'))
-      .some(el => isVisible(el) && isSendCtrl(el));
-    if (areaSend) return 'twofa';
-  }
-
-  // 5) Formulário de login em montagem: vários inputs de texto + texto de login.
-  const textInputs = visibleInputs.filter(el => el.type === 'text' || el.tagName === 'INPUT');
-  if (textInputs.length >= 2) {
-    const bodyText = norm(document.body.innerText || '');
-    if (bodyText.includes('login') || document.querySelector('.login-form, .el-form')) {
-      return 'login-form';
+  if (!hasLoginForm) {
+    const pageHasLoginBtn = Array.from(document.querySelectorAll('button, a')).some(el => isVisible(el) && isLoginSubmitBtn(el));
+    if (pageHasLoginBtn) {
+      const hasPass = visibleInputs.some(i => i.type === 'password' || i.getAttribute('type') === 'password');
+      const hasAccount = visibleInputs.some(isEditableAccountField);
+      if (hasPass && hasAccount) hasLoginForm = true;
     }
   }
 
-  // 6) Dashboard: sem formulário de login nem 2FA, com menu lateral real.
-  const hasVisibleMenu = Array.from(document.querySelectorAll('aside, .el-menu, .sidebar, nav')).some(isVisible);
-  if (hasVisibleMenu) {
-    return 'dashboard';
+  // Shell autenticado do painel: não basta existir um <nav> genérico. Exigimos
+  // um container visível com múltiplos itens reais de navegação e ao menos um
+  // destino/texto típico da aplicação. É evidência positiva observada no DOM.
+  const dashboardTextTerms = ['dashboard', 'home', 'account', 'client', 'customer',
+    'reseller', 'package', 'device', 'order', 'renew', 'usuario', 'cliente',
+    '账户', '客户', '设备', '订单'];
+  const dashboardMarkers: string[] = [];
+  const menuContainers = Array.from(document.querySelectorAll('aside, .el-menu, .sidebar, nav')).filter(isVisible);
+  const hasDashboardMenu = menuContainers.some(menu => {
+    const items = Array.from(menu.querySelectorAll('a, .el-menu-item, .el-submenu__title, [role="menuitem"]'))
+      .filter(isVisible);
+    const markers = items.map(item => {
+      const text = norm(item.textContent || '');
+      const href = norm(item.getAttribute('href') || item.querySelector('a')?.getAttribute('href') || '');
+      return { text, href };
+    }).filter(item =>
+      (item.href.includes('#/') && !item.href.includes('/login'))
+      || dashboardTextTerms.some(term => item.text.includes(term)));
+    if (items.length >= 2 && markers.length >= 1) {
+      dashboardMarkers.push(...markers.slice(0, 4).map(item => item.href || trunc(item.text, 60)));
+      return true;
+    }
+    return false;
+  });
+
+  // DECISÃO por EVIDÊNCIA POSITIVA.
+  // 1) Dialog com sinais reais de desafio 2FA.
+  const twofaDialog = dialogs.find(d =>
+    d.hasCodeInput
+    || (d.maskedEmail && (d.hasSendControl || d.hasSecurityHeading))
+    || (d.hasSendControl && d.hasSecurityHeading));
+  if (twofaDialog) {
+    return { stage: 'twofa', title, headings, hasPasswordInput, hasLoginForm, hasDashboardMenu, dashboardMarkers, bodyTwofaEvidence, hasFullPageTwofa, dialogs };
   }
 
-  return 'unknown';
+  // 2) Login form real vem antes do desafio em tela cheia: captcha com
+  // placeholder "code/verification" nunca pode ser promovido a 2FA.
+  if (hasLoginForm) {
+    return { stage: 'login-form', title, headings, hasPasswordInput, hasLoginForm, hasDashboardMenu, dashboardMarkers, bodyTwofaEvidence, hasFullPageTwofa, dialogs };
+  }
+
+  // 3) Desafio em tela cheia: exige duas evidências co-ocorrentes. Cobre tanto
+  // a etapa "Send" quanto a etapa de digitação sem depender da rota atual.
+  if (bodyTwofaEvidence.hasCodeInput || hasFullPageTwofa) {
+    return { stage: 'twofa', title, headings, hasPasswordInput, hasLoginForm, hasDashboardMenu, dashboardMarkers, bodyTwofaEvidence, hasFullPageTwofa, dialogs };
+  }
+
+  // 4) Dashboard autenticado: shell do painel com destinos reais de navegação.
+  if (hasDashboardMenu) {
+    return { stage: 'dashboard', title, headings, hasPasswordInput, hasLoginForm, hasDashboardMenu, dashboardMarkers, bodyTwofaEvidence, hasFullPageTwofa, dialogs };
+  }
+
+  return { stage: 'unknown', title, headings, hasPasswordInput, hasLoginForm, hasDashboardMenu, dashboardMarkers, bodyTwofaEvidence, hasFullPageTwofa, dialogs };
+}
+
+/**
+ * Lado Node: avalia o mapeador no navegador e imprime a EVIDÊNCIA da tela
+ * (title, headings, dialogs com email mascarado/campo de código) logo antes de
+ * cada decisão. É o registro do "o que a tela mostra" — base para validar o
+ * comportamento sem depender de adivinhação ou de relatos indiretos.
+ */
+async function logScreenEvidence(page: Page, label: string): Promise<void> {
+  try {
+    const snap = await page.evaluate(mapScreen, TWOFA_SIGNALS);
+    const evidence: string[] = [];
+    evidence.push(`title="${snap.title || '(vazio)'}"`);
+    if (snap.headings.length > 0) evidence.push(`headings=[${snap.headings.join(' | ')}]`);
+    if (snap.hasPasswordInput) evidence.push('input senha');
+    if (snap.hasLoginForm) evidence.push('login-form');
+    if (snap.hasDashboardMenu) evidence.push(`menu painel=[${snap.dashboardMarkers.join(' | ')}]`);
+    const body2fa = snap.bodyTwofaEvidence;
+    if (body2fa.maskedEmail || body2fa.hasCodeInput || body2fa.hasSendControl || body2fa.hasSecurityHeading) {
+      evidence.push(`corpo-2fa=[${body2fa.maskedEmail ? 'email-mascarado ' : ''}${body2fa.hasCodeInput ? 'campo-codigo ' : ''}${body2fa.hasSendControl ? 'send ' : ''}${body2fa.hasSecurityHeading ? 'heading-seg' : ''}]`);
+    }
+    if (snap.hasFullPageTwofa) evidence.push('2fa-tela-cheia-local');
+    for (const d of snap.dialogs) {
+      const flags: string[] = [];
+      if (d.hasCodeInput) flags.push('campo-codigo');
+      if (d.maskedEmail) flags.push('email-mascarado(***)');
+      if (d.hasSendControl) flags.push('send');
+      if (d.hasSecurityHeading) flags.push('heading-seg');
+      evidence.push(`dialog[${flags.join(', ') || 'sem-sinais'}]: ${d.text.slice(0, 120)}`);
+    }
+    console.log(`  🖥️  [${label}] evidência: ${evidence.join(' || ')}`);
+  } catch (err) {
+    console.log(`  🖥️  [${label}] falha ao ler evidência: ${err}`);
+  }
 }
 
 /**
@@ -575,7 +696,9 @@ async function waitForLoginStage(page: Page, timeoutMs: number): Promise<LoginSt
   let current: LoginStage = 'unknown';
   let stableSince: number | null = null;
   while (Date.now() < deadline) {
-    const stage = await page.evaluate(detectLoginStage, TWOFA_SIGNALS);
+    // Avalia diretamente a função autocontida. Um wrapper que chamasse
+    // mapScreen() dentro de page.evaluate perderia o escopo do módulo no browser.
+    const stage = (await page.evaluate(mapScreen, TWOFA_SIGNALS)).stage;
     if (stage !== current || stableSince === null) {
       current = stage;
       stableSince = Date.now();
@@ -759,6 +882,7 @@ export async function loginToPanel(config: {
   // detectar o 2FA pendente. Aqui lemos o DOM, identificamos o estágio e
   // aguardamos a tela estabilizar antes de decidir.
   const stage = await waitForLoginStage(page, 15000);
+  await logScreenEvidence(page, 'fast-path');
 
   if (stage === 'dashboard') {
     console.log('  ✅ Já autenticado (tela de dashboard) — reuso de sessão, sem 2FA');
@@ -875,7 +999,9 @@ export async function loginToPanel(config: {
       console.log('    ⏳ Aguardando resposta do servidor...');
       await delay(3000);
 
-      // Trata 2FA se aparecer
+      // Trata 2FA se aparecer. A evidência é registrada antes do handler para
+      // preservar a tela original mesmo quando o desafio termina com sucesso.
+      await logScreenEvidence(page, `pós-login t${loginAttempts}`);
       const twoFAState = await handle2FA(page, sessionId);
       await delay(2000);
 
@@ -951,6 +1077,7 @@ export async function loginToPanel(config: {
   // Uma tela de Security Account/2FA em qualquer rota, ou 'unknown' não
   // detectado, nunca é promovido a sucesso por engano.
   const finalStage = await waitForLoginStage(page, 10000);
+  await logScreenEvidence(page, 'final');
   let successful = !any2FAFailed && finalStage === 'dashboard';
 
   if (successful) {
