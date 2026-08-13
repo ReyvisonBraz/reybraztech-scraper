@@ -108,21 +108,20 @@ async function handle2FA(page: Page, sessionId: string): Promise<'not-required' 
 
   const { codePlaceholders } = TWOFA_SIGNALS;
   const url = page.url();
-  const isSecurityPage = url.includes('/info/accountSecurity');
 
   // DECISÃO ÚNICA: o estágio é decidido pelo MESMO classificador serializado que
-  // o roteador de login usa. Nada de heurística duplicada aqui — captcha do login
-  // (login-form) nunca entra no protocolo, seja com placeholder "verification code".
-  const stage = await page.evaluate(detectLoginStage, TWOFA_SIGNALS);
-  if (stage === 'login-form') {
-    // Formulário real de login (senha + campo não-código): captcha, não 2FA.
+  // o roteador de login usa, e é ESTABILIZADO (aguardando montagem tardia do
+  // desafio). Nada de heurística duplicada aqui — um botão global "Send message"
+  // num dashboard (stage=dashboard) NUNCA abre o protocolo, e captcha do login
+  // (login-form) também não. Só `twofa` estabilizado entra.
+  const stage = await waitForLoginStage(page, 15000);
+  if (stage !== 'twofa') {
+    // login-form (captcha), dashboard (sem desafio) ou unknown: não há 2FA real.
     return 'not-required';
   }
 
-  // - awaitingCode: já há um campo de código visível (fase de digitação), cujo
-  //   handle é PRESERVADO para reutilizar na inserção (mesma heurística, sem
-  //   divergência). Normalização idêntica à do classificador (código→codigo).
-  // - needDispatch: há controle visível de SOLICITAR código (fase de envio).
+  // Estamos em um desafio 2FA confirmado. Descobre se há campo de código já
+  // aberto (awaitingCode) e preserva o handle exato para a inserção.
   const allInputs = await page.$$('input');
   let awaitingCode = false;
   let codeInputHandle: any = null;
@@ -141,75 +140,55 @@ async function handle2FA(page: Page, sessionId: string): Promise<'not-required' 
     if (isCode) { awaitingCode = true; codeInputHandle = input; break; }
   }
 
-  const sendButtons = await page.$$('button, span.text-primary, a.text-primary');
-  let needDispatch = false;
-  for (const btn of sendButtons) {
-    const text = await btn.evaluate((el: Element) => el.textContent || '');
-    if (!isSendCodeLabel(text)) continue;
-    const visible = await btn.evaluate((el) => {
-      const s = window.getComputedStyle(el);
-      return s.display !== 'none' && s.visibility !== 'hidden' && el.getBoundingClientRect().height > 0;
-    });
-    if (visible) { needDispatch = true; break; }
-  }
-
-  // Nenhum 2FA real: estágio não-twofa, sem input de código e sem envio.
-  if (stage !== 'twofa' && !awaitingCode && !needDispatch && !isSecurityPage) {
-    return 'not-required';
-  }
-  if (stage !== 'twofa' && !awaitingCode && !needDispatch) {
-    // É (ou parece) a tela de security, mas sem nenhum sinal de desafio ativo.
-    return 'not-required';
-  }
-
   console.log('\n  🔒 Verificação de 2FA detectada! (Dispositivo / Navegador desconhecido)');
 
   // Estado de envio para a mensagem do Telegram (três valores, sem afirmar o que
   // não foi observado):
   //  - 'already-awaiting' — campo de código já aberto; nenhum clique/feedback vistos.
   //  - 'confirmed'        — envio clicado e feedback confirmado.
-  //  - 'unconfirmed'      — envio clicado, mas sem feedback observável.
+  //  - 'unconfirmed'      - envio clicado, mas sem feedback observável.
   let dispatchState: 'already-awaiting' | 'confirmed' | 'unconfirmed' = 'already-awaiting';
 
-  // PASSO 1: Selecionar a opção de E-mail
-  try {
-    console.log('  🔄 Tentando selecionar a opção de E-mail invés de SMS...');
-    
-    // Tenta primeiro abrir um possível dropdown de tipo de verificação
-    const verifyMethodInputs = await page.$$('.el-select');
-    if (verifyMethodInputs.length > 0) {
-      await verifyMethodInputs[0].click().catch(() => {});
-      await new Promise(r => setTimeout(r, 800)); // Espera a animação do dropdown
-    }
-
-    // Procura a opção "Email" ou "E-mail" para clicar
-    const elementsWithEmail = await page.$$('li.el-select-dropdown__item, span, label, div.el-radio, span.el-radio__label');
-    for (const el of elementsWithEmail) {
-      const text = await el.evaluate(e => e.textContent || '');
-      const hasEmailText = text.toLowerCase().includes('email') || text.toLowerCase().includes('e-mail');
-      const isShort = text.trim().length < 40; // Evita clicar em divs gigantes que contêm a palavra
+  // Se o campo de código JÁ está aberto, NÃO alteramos o método de entrega nem
+  // redispachamos: o painel já disparou/aguarda um código. Mudar SMS→e-mail aqui
+  // poderia invalidar o desafio em andamento; manter a espera no estado atual.
+  if (!awaitingCode) {
+    // PASSO 1: Selecionar a opção de E-mail (só quando ainda vamos disparar).
+    try {
+      console.log('  🔄 Tentando selecionar a opção de E-mail invés de SMS...');
       
-      if (hasEmailText && isShort) {
-        const isVisible = await el.evaluate((e: any) => {
-          const s = window.getComputedStyle(e);
-          return s.display !== 'none' && s.visibility !== 'hidden' && e.getBoundingClientRect().height > 0 && e.getBoundingClientRect().width > 0;
-        });
-        if (isVisible) {
-          await (el as any).click();
-          console.log('  📧 Opção de E-mail selecionada com sucesso!');
-          await new Promise(r => setTimeout(r, 800));
-          break;
+      // Tenta primeiro abrir um possível dropdown de tipo de verificação
+      const verifyMethodInputs = await page.$$('.el-select');
+      if (verifyMethodInputs.length > 0) {
+        await verifyMethodInputs[0].click().catch(() => {});
+        await new Promise(r => setTimeout(r, 800)); // Espera a animação do dropdown
+      }
+
+      // Procura a opção "Email" ou "E-mail" para clicar
+      const elementsWithEmail = await page.$$('li.el-select-dropdown__item, span, label, div.el-radio, span.el-radio__label');
+      for (const el of elementsWithEmail) {
+        const text = await el.evaluate(e => e.textContent || '');
+        const hasEmailText = text.toLowerCase().includes('email') || text.toLowerCase().includes('e-mail');
+        const isShort = text.trim().length < 40; // Evita clicar em divs gigantes que contêm a palavra
+        
+        if (hasEmailText && isShort) {
+          const isVisible = await el.evaluate((e: any) => {
+            const s = window.getComputedStyle(e);
+            return s.display !== 'none' && s.visibility !== 'hidden' && e.getBoundingClientRect().height > 0 && e.getBoundingClientRect().width > 0;
+          });
+          if (isVisible) {
+            await (el as any).click();
+            console.log('  📧 Opção de E-mail selecionada com sucesso!');
+            await new Promise(r => setTimeout(r, 800));
+            break;
+          }
         }
       }
+    } catch (err) {
+      console.log('  ⚠️ Não foi possível selecionar Email automaticamente (ou já estava selecionado).');
     }
-  } catch (err) {
-    console.log('  ⚠️ Não foi possível selecionar Email automaticamente (ou já estava selecionado).');
-  }
 
-  // PASSO 2: Disparar o envio do código — SÓ se ainda não há um campo de código.
-  // Estágio "awaiting-code" (código já enviado/modal reaberto) pula direto para a
-  // espera; não clica em botão e não afirma confirmação que não observou.
-  if (!awaitingCode && needDispatch) {
+    // PASSO 2: Disparar o envio do código.
     let sendClicked = false;
     const allButtons = await page.$$('button, span.text-primary, a.text-primary');
     for (const btn of allButtons) {
@@ -290,41 +269,33 @@ async function handle2FA(page: Page, sessionId: string): Promise<'not-required' 
   }
 
   if (!codeInserted) {
-    const codeInputSelectors = [
-      '.el-dialog input[type="text"]',
-      '.el-dialog input',
-      'input[placeholder*="code"]',
-      'input[placeholder*="codigo"]',
-      'input[placeholder*="Code"]',
-      'input[placeholder*="verification"]',
-      '.code-input input'
-    ];
-
-    for (const selector of codeInputSelectors) {
-      const input = await page.$(selector);
-      if (input) {
-        await input.click({ clickCount: 3 });
-        await input.type(code);
-        await mark2FAChallengeInput(page, input);
-        codeInserted = true;
-        break;
-      }
-    }
-  }
-
-  // Fallback se não achou o input (mesma normalização do classificador)
-  if (!codeInserted) {
-    const allInputs = await page.$$('input[type="text"]');
+    // Fallback SEGURO após remount do SPA (handle original detached): redescobre
+    // SOMENTE inputs visíveis cujo placeholder normalizado casa com codePlaceholders
+    // ou que estejam em .code-input. NUNCA usa .el-dialog input genérico — não
+    // digita em campo arbitrário do modal.
+    const allInputs = await page.$$('input');
     for (const input of allInputs) {
-      const ph = await input.evaluate(el => (el.getAttribute('placeholder') || '')
-        .normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase());
-      if (ph.includes('code') || ph.includes('codigo') || ph.includes('verification')) {
+      const visible = await input.evaluate((el) => {
+        const s = window.getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden' && el.getBoundingClientRect().height > 0;
+      });
+      if (!visible) continue;
+      const isCode = await input.evaluate((el, terms) => {
+        const ph = (el.getAttribute('placeholder') || '')
+          .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+          .trim().toLowerCase();
+        return terms.some((t: string) => ph.includes(t)) || !!el.closest('.code-input');
+      }, codePlaceholders);
+      if (!isCode) continue;
+      try {
         await input.click({ clickCount: 3 });
         await input.type(code);
         await mark2FAChallengeInput(page, input);
         codeInserted = true;
-        break;
+      } catch {
+        codeInserted = false;
       }
+      break;
     }
   }
 
@@ -443,18 +414,18 @@ type LoginStage = 'login-form' | 'twofa' | 'dashboard' | 'unknown';
 
 const TWOFA_SIGNALS = {
   // Placeholders que identificam um campo onde o CÓDIGO 2FA deve ser digitado.
-  // "verification" pode ser captcha do login; por isso a precedência ao
-  // formulário com senha deve vir ANTES (ver detectLoginStage).
+  // "verification" pode ser captcha do login; por isso a prova do formulário de
+  // login (estrutura) deve vir ANTES no classificador (ver detectLoginStage).
   codePlaceholders: ['code', 'codigo', 'verification'],
   // Apenas termos de SOLICITAR o envio do código (disparo inicial). Não inclui
   // verify/confirmar/确认, que são a etapa de CONFIRMAR o código digitado.
   sendTerms: ['send', 'obter codigo', '获取验证码', '发送', 'enviar', 'get code'],
   // Texto de HEADING de área de segurança/verificação. Usado como sinal
-  // COMBINADO com um controle de enviar para não deixar um botão genérico
-  // ("Send message", "Enviar aviso") virar 2FA no dashboard.
+  // COMBINADO com um controle de enviar, DENTRO do mesmo container, para não
+  // deixar um botão genérico ("Send message") virar 2FA no dashboard.
   securityHeadingTerms: ['account security', 'security account', 'security settings',
-    'twofactor', 'two factor', '2fa', 'verify identity', 'verification',
-    'seguranca da conta', 'autenticacao', '安全账户', '验证', '安全中心'],
+    'twofactor', 'two factor', '2fa', 'verify identity', 'seguranca da conta',
+    'autenticacao', '安全账户', '验证', '安全中心'],
 } as const;
 
 type TwofaSignals = typeof TWOFA_SIGNALS;
@@ -470,10 +441,11 @@ function isSendCodeLabel(text: string): boolean {
 
 /**
  * Lê o DOM atual e decide o estágio do login pela TELA, não pela URL.
+ * Tudo é ESCONDIDO A CONTAINERS: um dialog/área de desafio, ou um container de
+ * formulário de login. Sinais separados em regiões diferentes não se combinam.
  * Os sinais são passados como parâmetro serializável (page.evaluate(detectLoginStage, TWOFA_SIGNALS))
- * para que o mesmo vocabulário do handler seja usado — os predicados são
- * definidos AQUI DENTRO (auto-contidos), porque page.evaluate serializa só o
- * corpo desta função, sem o escopo do módulo.
+ * e os predicados são definidos AQUI DENTRO (auto-contidos), porque page.evaluate
+ * serializa só o corpo desta função, sem o escopo do módulo.
  */
 function detectLoginStage(signals: TwofaSignals): LoginStage {
   const { codePlaceholders, sendTerms, securityHeadingTerms } = signals;
@@ -486,52 +458,86 @@ function detectLoginStage(signals: TwofaSignals): LoginStage {
   const isCodeInput = (el: HTMLInputElement) =>
     codePlaceholders.some(t => norm(el.getAttribute('placeholder') || '').includes(t))
     || !!el.closest('.code-input');
-  const isPlainField = (el: HTMLInputElement) =>
-    el.type !== 'password' && (el.type === 'text' || el.type === 'email' || el.type === 'tel')
-    && !isCodeInput(el);
+  // Campo de CONTA editável: input de texto não-senha, editável (exclui readonly
+  // e o input interno de componentes como .el-select/ant-select) e não-código.
+  const isEditableAccountField = (el: HTMLInputElement) => {
+    if (el.closest('.el-select, .ant-select')) return false;
+    if (el.readOnly || el.disabled) return false;
+    if (el.type === 'password' || isCodeInput(el)) return false;
+    return el.type === 'text' || el.type === 'email' || el.type === 'tel'
+      || el.type === 'number' || el.type === '';
+  };
   const isSendCtrl = (el: Element) =>
     sendTerms.some(t => norm(el.textContent || '').includes(t));
+  const isLoginSubmitBtn = (el: Element) => {
+    const t = norm(el.textContent || '');
+    return t.includes('login') || t.includes('entrar') || t.includes('登入') || t.includes('登录');
+  };
   const dialogs = Array.from(document.querySelectorAll('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal')).filter(isVisible);
-  const visibleInputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
-  const bodyText = norm(document.body.innerText || '');
 
-  // 1) MAIOR precedência: dialog/modal 2FA visível com sinal específico
-  //    (campo de código OU controle de solicitar). Modal 2FA sobre o formulário
-  //    ainda visível é twofa, NÃO login-form.
+  // 1) Dialog/modal 2FA — tudo ESCONDIDO ao dialog. Um dialog é desafio se tem
+  //    campo de código, OU controle de solicitar código combinado com heading de
+  //    segurança no MESMO dialog. Não aceita Send isolado em dialog comum.
   for (const d of dialogs) {
+    const inDialog = (el: Element) => el.closest('.el-dialog, .el-dialog__wrapper, [role="dialog"], .modal') === d;
     const dCode = Array.from(d.querySelectorAll('input')).filter(isVisible).some(isCodeInput);
-    const dSend = Array.from(d.querySelectorAll('button, span.text-primary, a.text-primary')).some(el => isVisible(el) && isSendCtrl(el));
-    if (dCode || dSend) return 'twofa';
+    const dText = norm(d.textContent || '');
+    const dHasHeading = securityHeadingTerms.some(t => dText.includes(t));
+    const dSend = Array.from(d.querySelectorAll('button, span.text-primary, a.text-primary'))
+      .some(el => inDialog(el) && isVisible(el) && isSendCtrl(el));
+    if (dCode || (dSend && dHasHeading)) return 'twofa';
   }
 
-  // 2) Login form COMPLETO, por ESTRUTURA: senha + um campo não-senha que NÃO
-  //    seja código (conta/captcha, qualquer placeholder, inclusive "Please enter").
-  //    Tem precedência sobre placeholder genérico "code/verification": captcha do
-  //    login não é 2FA. Um 2FA de Security Account (senha + código, sem conta)
-  //    não satisfaz — código é excluído, então só sobra senha → não é login-form.
-  const hasPass = visibleInputs.some(i => i.type === 'password' || i.getAttribute('type') === 'password');
-  const hasPlainField = visibleInputs.some(isPlainField);
-  if (hasPass && hasPlainField) return 'login-form';
+  // 2) Login form COMPLETO, por ESTRUTURA e AGrupamento: senha + campo de CONTA
+  //    editável (não-senha, não-código, não-readonly, não-select) no MESMO
+  //    container de formulário, com captcha/botão Login. Tem precedência sobre
+  //    placeholder "code/verification": captcha do login não é 2FA. Security
+  //    Account (senha + el-select de método + código) não tem conta editável →
+  //    não entra aqui.
+  const formContainers = Array.from(document.querySelectorAll('form, .login-form, .el-form')).filter(isVisible);
+  for (const f of formContainers) {
+    const inputs = Array.from(f.querySelectorAll('input')).filter(isVisible);
+    const hasPass = inputs.some(i => i.type === 'password' || i.getAttribute('type') === 'password');
+    const hasAccount = inputs.some(isEditableAccountField);
+    const hasCaptcha = inputs.filter(i => i.type === 'text').length >= 2;
+    const hasLoginBtn = Array.from(f.querySelectorAll('button, a')).some(el => isVisible(el) && isLoginSubmitBtn(el));
+    if (hasPass && hasAccount && (hasCaptcha || hasLoginBtn)) return 'login-form';
+  }
 
-  // 3) Input de código, FORA de um formulário de login (tela de digitação do 2FA).
+  // 2b) Mesmo critério de agrupamento, sem container explícito de form, mas com
+  //     senha + conta editável + botão Login na mesma área visível.
+  const pageHasLoginBtn = Array.from(document.querySelectorAll('button, a')).some(el => isVisible(el) && isLoginSubmitBtn(el));
+  if (pageHasLoginBtn) {
+    const visibleInputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
+    const hasPass = visibleInputs.some(i => i.type === 'password' || i.getAttribute('type') === 'password');
+    const hasAccount = visibleInputs.some(isEditableAccountField);
+    if (hasPass && hasAccount) return 'login-form';
+  }
+
+  // 3) Input de código FORA de dialog e FORA de login (tela de digitação 2FA).
+  const visibleInputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
   if (visibleInputs.some(isCodeInput)) {
     return 'twofa';
   }
 
-  // 4) Etapa Send de Security Account (tela cheia, ainda sem input de código):
-  //    controle visível de SOLICITAR código COMBINADO com heading de segurança.
-  //    Requer os DOIS sinais para não deixar um botão genérico de dashboard
-  //    ("Send message", "Enviar aviso") iniciar um falso 2FA.
-  const hasSecurityHeading = securityHeadingTerms.some(t => bodyText.includes(t));
-  const hasVisibleSendArea = Array.from(document.querySelectorAll('button, span.text-primary, a.text-primary'))
-    .some(el => isVisible(el) && isSendCtrl(el));
-  if (hasVisibleSendArea && hasSecurityHeading) {
-    return 'twofa';
+  // 4) Etapa Send de Security Account em tela cheia (sem input de código ainda):
+  //    controle de SOLICITAR código + heading de segurança no MESMO container de
+  //    área. Exige os DOIS, co-ocorrentes, para não virar 2FA num dashboard com
+  //    um botão "Send message" isolado.
+  const areas = Array.from(document.querySelectorAll('main, .main, .content, .el-main, section, .container')).filter(isVisible);
+  for (const area of areas) {
+    const areaText = norm(area.textContent || '');
+    const hasHeading = securityHeadingTerms.some(t => areaText.includes(t));
+    if (!hasHeading) continue;
+    const areaSend = Array.from(area.querySelectorAll('button, span.text-primary, a.text-primary'))
+      .some(el => isVisible(el) && isSendCtrl(el));
+    if (areaSend) return 'twofa';
   }
 
   // 5) Formulário de login em montagem: vários inputs de texto + texto de login.
   const textInputs = visibleInputs.filter(el => el.type === 'text' || el.tagName === 'INPUT');
   if (textInputs.length >= 2) {
+    const bodyText = norm(document.body.innerText || '');
     if (bodyText.includes('login') || document.querySelector('.login-form, .el-form')) {
       return 'login-form';
     }
