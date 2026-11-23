@@ -1,0 +1,15 @@
+node_modules/
+.test-results/
+test-results/
+playwright-report/
+.env
+.env.*
+storage-state/
+storageState/
+auth/
+screenshots/
+traces/
+videos/
+output/
+*.log
+*.har

@@ -1,0 +1,17 @@
+{
+  "name": "reseller-playwright-docker-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node ./scripts/assert-isolated-network.mjs && npm run versions:check && playwright test",
+    "versions:check": "node ./scripts/browser-version.mjs",
+    "versions:inspect": "node ./scripts/browser-version.mjs --print"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1"
+  }
+}
