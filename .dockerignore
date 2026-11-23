@@ -11,4 +11,5 @@ cookies
 *.pem
 *.key
 screenshots
+poc-reseller-playwright/
 .DS_Store
